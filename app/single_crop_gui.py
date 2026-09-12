@@ -148,6 +148,11 @@ def _render(
     return _display(vis, _PREVIEW_MAX_SIDE), _display(result, _RESULT_MAX_SIDE), f"{box_txt} ｜ {out_txt}"
 
 
+def _sanitize_filename(name: str) -> str:
+    """Strip characters Windows forbids in file names (path separators, etc.)."""
+    return "".join("_" if c in '<>:"/\\|?*' else c for c in name).strip(" .") or "cropped"
+
+
 def _save_single(
     im: Optional[Image.Image],
     center: Optional[Tuple[int, int]],
@@ -169,7 +174,46 @@ def _save_single(
     flatten_bg: bool,
     rename_png: bool,
     name_prefix: str,
-    delete_source: bool,
+    overwrite: bool,
+    delete_source_flag: bool,
+    source_path: str,
+) -> Tuple[str, Optional[str]]:
+    try:
+        return _save_single_impl(
+            im, center, mode, lp, tp, wp, hp, tw, th, high_q, auto_focal,
+            sx, sy, no_resize, output_dir, filename, out_format, flatten_bg,
+            rename_png, name_prefix, overwrite, delete_source_flag, source_path,
+        )
+    except Exception as e:
+        # Any escapee exception shows a bare "错误" toast in the UI; report the
+        # actual reason in the status line instead.
+        log.exception("Single crop save failed")
+        return f"保存失败：{type(e).__name__}: {e}", None
+
+
+def _save_single_impl(
+    im: Optional[Image.Image],
+    center: Optional[Tuple[int, int]],
+    mode: str,
+    lp: float,
+    tp: float,
+    wp: float,
+    hp: float,
+    tw: float,
+    th: float,
+    high_q: bool,
+    auto_focal: bool,
+    sx: float,
+    sy: float,
+    no_resize: bool,
+    output_dir: str,
+    filename: str,
+    out_format: str,
+    flatten_bg: bool,
+    rename_png: bool,
+    name_prefix: str,
+    overwrite: bool,
+    delete_source_flag: bool,
     source_path: str,
 ) -> Tuple[str, Optional[str]]:
     if im is None:
@@ -195,19 +239,28 @@ def _save_single(
     os.makedirs(output_dir, exist_ok=True)
 
     if rename_png:
-        prefix = (name_prefix or "").strip() or "image"
+        prefix = _sanitize_filename((name_prefix or "").strip() or "image")
         counter = 1
-        while os.path.exists(os.path.join(output_dir, f"{prefix}{counter}.png")):
+        while not overwrite and os.path.exists(
+            os.path.join(output_dir, f"{prefix}{counter}.png")
+        ):
             counter += 1
         out_path = os.path.join(output_dir, f"{prefix}{counter}.png")
     else:
-        name = os.path.splitext(((filename or "").strip() or "cropped"))[0]
+        name = (filename or "").strip()
+        if not name:
+            # No filename given: keep the source image's own name when known.
+            src = (source_path or "").strip().strip('"')
+            if src:
+                name = os.path.splitext(os.path.basename(src))[0]
+        name = _sanitize_filename(name)
         ext = ".png" if out_format == "PNG" else ".jpg"
         out_path = os.path.join(output_dir, name + ext)
-        counter = 1
-        while os.path.exists(out_path):
-            out_path = os.path.join(output_dir, f"{name}_{counter}{ext}")
-            counter += 1
+        if not overwrite:
+            counter = 1
+            while os.path.exists(out_path):
+                out_path = os.path.join(output_dir, f"{name}_{counter}{ext}")
+                counter += 1
 
     try:
         if out_path.lower().endswith(".jpg"):
@@ -220,7 +273,7 @@ def _save_single(
         return f"保存失败：{e}", None
 
     deleted = ""
-    if delete_source:
+    if delete_source_flag:
         src = (source_path or "").strip().strip('"')
         if src and os.path.isfile(src) and os.path.abspath(src) != os.path.abspath(out_path):
             try:
@@ -348,9 +401,13 @@ def gradio_single_crop_tab(
                 with gr.Row():
                     out_browse = gr.Button("📂 输出", elem_classes=["tool"], visible=not headless)
                 filename = gr.Textbox(
-                    label="文件名（不含扩展名；未启用重命名时使用）",
-                    value="cropped",
-                    placeholder="例如：my_image",
+                    label="文件名（不含扩展名；留空 = cropped，或沿用图片路径中的文件名）",
+                    value="",
+                    placeholder="留空则用图片路径的文件名（上传的图片无路径时为 cropped）",
+                )
+                overwrite = gr.Checkbox(
+                    label="覆盖已存在文件（勾选后同名文件直接覆盖，不再加序号）",
+                    value=False,
                 )
                 out_format = gr.Radio(choices=["PNG", "JPG"], value="PNG", label="格式")
                 flatten_bg = gr.Checkbox(label="透明背景拍平为白色", value=True)
@@ -592,6 +649,7 @@ def gradio_single_crop_tab(
                 flatten_bg,
                 rename_png,
                 name_prefix,
+                overwrite,
                 delete_source,
                 source_path,
             ],
