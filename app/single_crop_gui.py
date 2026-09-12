@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import gradio as gr
 from PIL import Image, ImageDraw
@@ -22,6 +22,7 @@ from .batch_crop_gui import (
     _center_crop_box_pixels,
     _crop_from_percent,
     _flatten_transparency_to_white,
+    _list_images,
     _smart_crop_box,
 )
 
@@ -153,6 +154,20 @@ def _sanitize_filename(name: str) -> str:
     return "".join("_" if c in '<>:"/\\|?*' else c for c in name).strip(" .") or "cropped"
 
 
+def _open_image(path: str) -> Optional[Image.Image]:
+    try:
+        im = Image.open(path)
+        im.load()
+        return im
+    except OSError as e:
+        log.warning("Single crop open failed %s: %s", path, e)
+        return None
+
+
+def _pos_text(idx: int, paths: List[str]) -> str:
+    return f"第 **{idx + 1} / {len(paths)}** 张：`{os.path.basename(paths[idx])}`"
+
+
 def _save_single(
     im: Optional[Image.Image],
     center: Optional[Tuple[int, int]],
@@ -177,9 +192,12 @@ def _save_single(
     overwrite: bool,
     delete_source_flag: bool,
     source_path: str,
-) -> Tuple[str, Optional[str]]:
+    auto_next: bool,
+    cur_idx: int,
+    image_list: List[str],
+):
     try:
-        return _save_single_impl(
+        msg, path = _save_single_impl(
             im, center, mode, lp, tp, wp, hp, tw, th, high_q, auto_focal,
             sx, sy, no_resize, output_dir, filename, out_format, flatten_bg,
             rename_png, name_prefix, overwrite, delete_source_flag, source_path,
@@ -188,7 +206,18 @@ def _save_single(
         # Any escapee exception shows a bare "错误" toast in the UI; report the
         # actual reason in the status line instead.
         log.exception("Single crop save failed")
-        return f"保存失败：{type(e).__name__}: {e}", None
+        msg, path = f"保存失败：{type(e).__name__}: {e}", None
+
+    # Auto-advance to the next image after a successful save.
+    if path is not None and auto_next and image_list:
+        nidx = (int(cur_idx or 0) + 1) % len(image_list)
+        nim = _open_image(image_list[nidx])
+        if nim is not None:
+            return msg, path, nim, image_list[nidx], nidx, _pos_text(nidx, image_list)
+        msg += f"（下一张打开失败：{image_list[nidx]}）"
+
+    pos = _pos_text(int(cur_idx or 0), image_list) if image_list else "未加载文件夹"
+    return msg, path, im, source_path, cur_idx, pos
 
 
 def _save_single_impl(
@@ -307,6 +336,8 @@ def gradio_single_crop_tab(
         )
 
         center_state = gr.State(None)
+        image_list = gr.State([])
+        current_idx = gr.State(0)
 
         with gr.Row(equal_height=False):
             with gr.Column(scale=3, min_width=320):
@@ -325,6 +356,23 @@ def gradio_single_crop_tab(
                 with gr.Row():
                     load_path_btn = gr.Button("从路径加载", visible=not headless)
                     reset_btn = gr.Button("重置设置", visible=not headless)
+
+                gr.Markdown("#### 图片文件夹（批量逐张裁剪）")
+                folder_path = gr.Textbox(
+                    label="图片文件夹路径",
+                    placeholder=r"D:/pics",
+                )
+                with gr.Row():
+                    folder_browse = gr.Button("📂 文件夹", elem_classes=["tool"], visible=not headless)
+                    load_folder_btn = gr.Button("加载文件夹", variant="primary", visible=not headless)
+                with gr.Row():
+                    prev_btn = gr.Button("◀ 上一张", visible=not headless)
+                    pos_label = gr.Markdown("未加载文件夹")
+                    next_btn = gr.Button("下一张 ▶", visible=not headless)
+                auto_next = gr.Checkbox(
+                    label="保存后自动切换到下一张",
+                    value=True,
+                )
 
                 gr.Markdown("#### 预览（绿框 = 裁剪区域）")
                 box_preview = gr.Image(label="整图 + 裁剪框", interactive=False, height=340)
@@ -462,6 +510,38 @@ def gradio_single_crop_tab(
                 return None, f"打开失败：{e}"
             return im, f"已加载 {os.path.basename(p)}（{im.width}×{im.height}px）"
 
+        def load_folder(folder: str):
+            p = (folder or "").strip().strip('"')
+            paths = _list_images(p)
+            if not paths:
+                return [], 0, None, "", "文件夹无效或没有图片。", "未加载文件夹"
+            im = _open_image(paths[0])
+            if im is None:
+                return paths, 0, None, "", f"第一张打开失败：{paths[0]}", _pos_text(0, paths)
+            return (
+                paths,
+                0,
+                im,
+                paths[0],
+                f"已加载 {len(paths)} 张图片，逐张裁剪；保存后可自动切到下一张。",
+                _pos_text(0, paths),
+            )
+
+        def _step(idx: int, paths: List[str], delta: int):
+            if not paths:
+                return 0, None, "", "请先加载图片文件夹。", "未加载文件夹"
+            nidx = (idx + delta) % len(paths)
+            im = _open_image(paths[nidx])
+            if im is None:
+                return nidx, None, "", f"打开失败：{paths[nidx]}", _pos_text(nidx, paths)
+            return nidx, im, paths[nidx], "", _pos_text(nidx, paths)
+
+        def go_prev(idx: int, paths: List[str]):
+            return _step(idx, paths, -1)
+
+        def go_next(idx: int, paths: List[str]):
+            return _step(idx, paths, 1)
+
         def reset_settings():
             return (
                 None,
@@ -512,7 +592,25 @@ def gradio_single_crop_tab(
         # --- events ---
 
         out_browse.click(fn=get_folder_path, inputs=output_folder, outputs=output_folder)
+        folder_browse.click(fn=get_folder_path, inputs=folder_path, outputs=folder_path)
         load_path_btn.click(fn=load_from_path, inputs=source_path, outputs=[input_image, status])
+
+        # 当通过路径加载单张图片时，同步填充图片路径，便于保存时沿用原文件名
+        load_folder_btn.click(
+            fn=load_folder,
+            inputs=[folder_path],
+            outputs=[image_list, current_idx, input_image, source_path, status, pos_label],
+        )
+        prev_btn.click(
+            fn=go_prev,
+            inputs=[current_idx, image_list],
+            outputs=[current_idx, input_image, source_path, status, pos_label],
+        )
+        next_btn.click(
+            fn=go_next,
+            inputs=[current_idx, image_list],
+            outputs=[current_idx, input_image, source_path, status, pos_label],
+        )
 
         preview_inputs = [
             input_image,
@@ -652,6 +750,9 @@ def gradio_single_crop_tab(
                 overwrite,
                 delete_source,
                 source_path,
+                auto_next,
+                current_idx,
+                image_list,
             ],
-            outputs=[status, result_file],
+            outputs=[status, result_file, input_image, source_path, current_idx, pos_label],
         )
