@@ -158,7 +158,9 @@ def _open_image(path: str) -> Optional[Image.Image]:
     try:
         im = Image.open(path)
         im.load()
-        return im
+        # 16-bit / CMYK / palette PNGs break Gradio's WEBP postprocess cache
+        # (the whole task then reports a bare "错误"), so normalize on load.
+        return im.convert("RGB")
     except OSError as e:
         log.warning("Single crop open failed %s: %s", path, e)
         return None
@@ -216,8 +218,10 @@ def _save_single(
             return msg, path, nim, image_list[nidx], nidx, _pos_text(nidx, image_list)
         msg += f"（下一张打开失败：{image_list[nidx]}）"
 
+    # Don't echo the input image back when nothing changed — the editor
+    # already holds it, and re-postprocessing an exotic-mode image can fail.
     pos = _pos_text(int(cur_idx or 0), image_list) if image_list else "未加载文件夹"
-    return msg, path, im, source_path, cur_idx, pos
+    return msg, path, gr.update(), gr.update(), cur_idx, pos
 
 
 def _save_single_impl(
@@ -503,11 +507,9 @@ def gradio_single_crop_tab(
             p = (path or "").strip().strip('"')
             if not p or not os.path.isfile(p):
                 return None, "路径无效，未找到文件。"
-            try:
-                im = Image.open(p)
-                im.load()
-            except OSError as e:
-                return None, f"打开失败：{e}"
+            im = _open_image(p)
+            if im is None:
+                return None, "打开失败，详见服务端日志。"
             return im, f"已加载 {os.path.basename(p)}（{im.width}×{im.height}px）"
 
         def load_folder(folder: str):
