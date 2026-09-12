@@ -1,185 +1,238 @@
 """
-Single-image crop tab — interactive crop with the Gradio ImageEditor
-(crop / resize transforms), optional aspect-ratio lock, optional target
-resize after cropping, and transparent-background flattening on save.
+Single-image crop tab — batch-tab-style controls (target resolution /
+custom % region, auto focal, manual shift, PNG rename) with a
+click-to-move crop box locked to the target aspect ratio (no stretching):
+the box always matches the target W:H, then the crop is resized to the
+exact target resolution. Common resolution presets included.
 """
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional, Tuple
 
 import gradio as gr
-import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from .class_gui_config import KohyaSSGUIConfig
 from .common_gui import get_folder_path, scriptdir
 from .custom_logging import setup_logging
+from .batch_crop_gui import (
+    _apply_shift,
+    _center_crop_box_pixels,
+    _crop_from_percent,
+    _flatten_transparency_to_white,
+    _smart_crop_box,
+)
 
 log = setup_logging()
 
-RATIO_CHOICES = ["自由", "1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16", "4:5", "5:4"]
-RATIO_FREE = "自由"
-FIT_STRETCH = "拉伸"
-FIT_COVER = "裁剪补齐（溢出部分裁掉）"
-FIT_CONTAIN = "留白填充（白边）"
+MODE_TARGET = "按目标分辨率（无拉伸）"
+MODE_REGION = "自定义区域（%）"
+
+PRESET_CUSTOM = "自定义"
+DEFAULT_PRESET = "1536×1536（1:1）"
+RESOLUTION_PRESETS = [
+    "2560×1440（16:9）",
+    "2560×1920（4:3）",
+    "1920×1080（16:9）",
+    "1536×1536（1:1）",
+    "1280×720（16:9）",
+    "1024×1024（1:1）",
+    "1216×832（3:2 横）",
+    "832×1216（3:2 竖）",
+]
+
+_PREVIEW_MAX_SIDE = 900
+_RESULT_MAX_SIDE = 480
 
 
-def _parse_ratio(choice: str) -> Optional[float]:
-    """Return width/height as a float, or None for '自由'."""
-    if not choice or choice == RATIO_FREE:
-        return None
-    try:
-        w_s, h_s = choice.split(":", 1)
-        w, h = float(w_s), float(h_s)
-        if w <= 0 or h <= 0:
-            return None
-        return w / h
-    except ValueError:
-        return None
+def _parse_preset(choice: str) -> Tuple[Optional[int], Optional[int]]:
+    if not choice or choice == PRESET_CUSTOM:
+        return None, None
+    m = re.search(r"(\d+)\s*[×xX*]\s*(\d+)", choice)
+    if not m:
+        return None, None
+    return int(m.group(1)), int(m.group(2))
 
 
-def _flatten_transparency_to_white(img: Image.Image) -> Image.Image:
-    if img.mode in ("RGBA", "LA"):
-        if img.mode == "LA":
-            img = img.convert("RGBA")
-        bg = Image.new("RGB", img.size, (255, 255, 255))
-        bg.paste(img, mask=img.split()[3])
-        return bg
-    if img.mode == "P" and "transparency" in img.info:
-        img = img.convert("RGBA")
-        bg = Image.new("RGB", img.size, (255, 255, 255))
-        bg.paste(img, mask=img.split()[3])
-        return bg
-    if img.mode != "RGB":
-        return img.convert("RGB")
-    return img
-
-
-def _crop_from_editor_value(editor_value: dict) -> Optional[Image.Image]:
-    """Extract the crop result from an ImageEditor value dict (background + composite)."""
-    if not isinstance(editor_value, dict):
-        return None
-    bg = editor_value.get("background")
-    composite = editor_value.get("composite")
-
-    # Prefer the composite: it reflects the applied crop transform.
-    base = composite if composite is not None else bg
-    if base is None:
-        return None
-    if isinstance(base, np.ndarray):
-        base = Image.fromarray(base)
-
-    # When a crop rect is applied the composite equals the cropped region,
-    # but it is placed on a canvas-sized transparent image in some versions.
-    # Trim fully-transparent borders to recover the actual pixels.
-    if base.mode in ("RGBA", "LA"):
-        alpha = base.split()[3]
-        bbox = alpha.getbbox()
-        if bbox:
-            base = base.crop(bbox)
-
-    if bg is not None and composite is not None:
-        # If nothing was cropped, composite still matches the background:
-        # prefer the trimmed result either way, it is identical.
-        pass
-    return base
-
-
-def _crop_by_ratio(img: Image.Image, ratio: Optional[float]) -> Image.Image:
-    """Center-crop to the given aspect ratio (fallback path without the editor crop)."""
-    if ratio is None:
-        return img
-    W, H = img.size
-    if W / H > ratio:
-        cw = int(round(H * ratio))
+def _fit_box_size(W: int, H: int, tw: int, th: int) -> Tuple[int, int]:
+    """Largest box inside the image with exactly the tw/th aspect."""
+    ra = tw / th
+    if W / H > ra:
         ch = H
+        cw = int(round(H * ra))
     else:
         cw = W
-        ch = int(round(W / ratio))
-    cw = max(1, min(cw, W))
-    ch = max(1, min(ch, H))
-    l = (W - cw) // 2
-    t = (H - ch) // 2
-    return img.crop((l, t, l + cw, t + ch))
+        ch = int(round(W / ra))
+    return max(1, min(cw, W)), max(1, min(ch, H))
 
 
-def _apply_target_resize(
-    img: Image.Image, tw: float, th: float, fit: str, high_q: bool
-) -> Image.Image:
-    tw_i = max(1, int(round(float(tw or 0))))
-    th_i = max(1, int(round(float(th or 0))))
-    if tw_i <= 1 and th_i <= 1:
-        return img
-    if tw_i <= 1:
-        tw_i = max(1, int(round(img.width * th_i / img.height)))
-    if th_i <= 1:
-        th_i = max(1, int(round(img.height * tw_i / img.width)))
-    res = Image.LANCZOS if high_q else Image.BILINEAR
-    if fit == FIT_STRETCH:
-        return img.resize((tw_i, th_i), res)
-    if fit == FIT_COVER:
-        scale = max(tw_i / img.width, th_i / img.height)
-        nw, nh = int(round(img.width * scale)), int(round(img.height * scale))
-        im2 = img.resize((nw, nh), res)
-        l = (nw - tw_i) // 2
-        t = (nh - th_i) // 2
-        return im2.crop((l, t, l + tw_i, t + th_i))
-    # Contain (pad): scale to fit, pad with white
-    scale = min(tw_i / img.width, th_i / img.height)
-    nw, nh = max(1, int(round(img.width * scale))), max(1, int(round(img.height * scale)))
-    im2 = img.resize((nw, nh), res)
-    canvas = Image.new("RGB", (tw_i, th_i), (255, 255, 255))
-    canvas.paste(im2, ((tw_i - nw) // 2, (th_i - nh) // 2))
-    return canvas
+def _target_box(
+    im: Image.Image,
+    tw: int,
+    th: int,
+    center: Optional[Tuple[int, int]],
+    auto_focal: bool,
+    shift_x: float,
+    shift_y: float,
+) -> Tuple[int, int, int, int]:
+    """Aspect-locked crop box. Clicked point wins as box center; otherwise
+    edge-energy focal (if enabled) or center placement."""
+    W, H = im.size
+    if center is not None:
+        cw, ch = _fit_box_size(W, H, tw, th)
+        cx, cy = center
+        l = max(0, min(int(cx - cw / 2), W - cw))
+        t = max(0, min(int(cy - ch / 2), H - ch))
+    elif auto_focal:
+        l, t, cw, ch = _smart_crop_box(im, tw, th)
+    else:
+        l, t, cw, ch = _center_crop_box_pixels(im, tw, th)
+    l, t = _apply_shift(l, t, cw, ch, W, H, shift_x, shift_y)
+    return l, t, cw, ch
 
 
-def _save_image(
-    editor_value: dict,
+def _display(im: Image.Image, max_side: int) -> Image.Image:
+    s = max_side / max(1, max(im.width, im.height))
+    if s >= 1.0:
+        return im.copy()
+    return im.resize(
+        (max(1, round(im.width * s)), max(1, round(im.height * s))), Image.LANCZOS
+    )
+
+
+def _render(
+    im: Optional[Image.Image],
+    center: Optional[Tuple[int, int]],
+    mode: str,
+    lp: float,
+    tp: float,
+    wp: float,
+    hp: float,
+    tw: float,
+    th: float,
+    high_q: bool,
+    auto_focal: bool,
+    shift_x: float,
+    shift_y: float,
+    no_resize: bool,
+) -> Tuple[Optional[Image.Image], Optional[Image.Image], str]:
+    """Annotated full image + result preview + one-line box info."""
+    if im is None:
+        return None, None, "请先上传或加载图片。"
+    tw_i = max(1, int(round(float(tw or 1024))))
+    th_i = max(1, int(round(float(th or 1024))))
+    lw = max(2, int(im.width / 400))
+
+    if mode == MODE_REGION:
+        l, t, bw, bh, cropped = _crop_from_percent(im, lp, tp, wp, hp)
+        box_txt = f"裁剪区域：({l}, {t}) {bw}×{bh}px"
+    else:
+        l, t, bw, bh = _target_box(im, tw_i, th_i, center, auto_focal, shift_x, shift_y)
+        cropped = im.crop((l, t, l + bw, t + bh))
+        box_txt = f"裁剪框：({l}, {t}) {bw}×{bh}px"
+
+    vis = im.copy()
+    ImageDraw.Draw(vis).rectangle(
+        [l, t, l + bw - 1, t + bh - 1], outline="#00FF88", width=lw
+    )
+
+    if no_resize:
+        result = cropped
+        out_txt = f"输出：{bw}×{bh}（不缩放）"
+    else:
+        res = Image.LANCZOS if high_q else Image.BILINEAR
+        result = cropped.resize((tw_i, th_i), res)
+        out_txt = f"输出：{tw_i}×{th_i}"
+    return _display(vis, _PREVIEW_MAX_SIDE), _display(result, _RESULT_MAX_SIDE), f"{box_txt} ｜ {out_txt}"
+
+
+def _save_single(
+    im: Optional[Image.Image],
+    center: Optional[Tuple[int, int]],
+    mode: str,
+    lp: float,
+    tp: float,
+    wp: float,
+    hp: float,
+    tw: float,
+    th: float,
+    high_q: bool,
+    auto_focal: bool,
+    sx: float,
+    sy: float,
+    no_resize: bool,
     output_dir: str,
     filename: str,
     out_format: str,
     flatten_bg: bool,
-    tw: float,
-    th: float,
-    resize_fit: str,
-    do_resize: bool,
-    high_q: bool,
-    ratio_choice: str,
+    rename_png: bool,
+    name_prefix: str,
+    delete_source: bool,
+    source_path: str,
 ) -> Tuple[str, Optional[str]]:
-    """Crop + optional ratio/resize + save. Returns (status, filepath or None)."""
-    img = _crop_from_editor_value(editor_value)
-    if img is None:
-        return "没有可保存的图片。请先上传图片并裁剪。", None
-    img = _crop_by_ratio(img, _parse_ratio(ratio_choice))
-    if do_resize:
-        img = _apply_target_resize(img, tw, th, resize_fit, high_q)
-    output_dir = (output_dir or "").strip().strip('"')
-    if not output_dir:
-        output_dir = os.path.join(scriptdir, "outputs", "single_crop")
+    if im is None:
+        return "没有可保存的图片。请先上传或加载图片。", None
+    tw_i = max(1, int(round(float(tw or 1024))))
+    th_i = max(1, int(round(float(th or 1024))))
+
+    if mode == MODE_REGION:
+        _l, _t, _bw, _bh, out = _crop_from_percent(im, lp, tp, wp, hp)
+        if not no_resize:
+            res = Image.LANCZOS if high_q else Image.BILINEAR
+            out = out.resize((tw_i, th_i), res)
+    else:
+        l, t, bw, bh = _target_box(im, tw_i, th_i, center, auto_focal, sx, sy)
+        out = im.crop((l, t, l + bw, t + bh))
+        if not no_resize:
+            res = Image.LANCZOS if high_q else Image.BILINEAR
+            out = out.resize((tw_i, th_i), res)
+
+    output_dir = (output_dir or "").strip().strip('"') or os.path.join(
+        scriptdir, "outputs", "single_crop"
+    )
     os.makedirs(output_dir, exist_ok=True)
-    filename = (filename or "").strip()
-    if not filename:
-        filename = "cropped"
-    name, _ = os.path.splitext(filename)
-    ext = ".png" if out_format == "PNG" else ".jpg"
-    out_path = os.path.join(output_dir, name + ext)
-    counter = 1
-    while os.path.exists(out_path):
-        out_path = os.path.join(output_dir, f"{name}_{counter}{ext}")
-        counter += 1
+
+    if rename_png:
+        prefix = (name_prefix or "").strip() or "image"
+        counter = 1
+        while os.path.exists(os.path.join(output_dir, f"{prefix}{counter}.png")):
+            counter += 1
+        out_path = os.path.join(output_dir, f"{prefix}{counter}.png")
+    else:
+        name = os.path.splitext(((filename or "").strip() or "cropped"))[0]
+        ext = ".png" if out_format == "PNG" else ".jpg"
+        out_path = os.path.join(output_dir, name + ext)
+        counter = 1
+        while os.path.exists(out_path):
+            out_path = os.path.join(output_dir, f"{name}_{counter}{ext}")
+            counter += 1
+
     try:
-        if flatten_bg:
-            img = _flatten_transparency_to_white(img)
-        if ext == ".jpg":
-            _flatten_transparency_to_white(img).save(out_path, quality=95)
+        if out_path.lower().endswith(".jpg"):
+            _flatten_transparency_to_white(out).save(out_path, quality=95)
         else:
-            img.save(out_path, "PNG")
+            save_img = _flatten_transparency_to_white(out) if flatten_bg else out
+            save_img.save(out_path, "PNG")
     except OSError as e:
         log.warning("Single crop save failed %s: %s", out_path, e)
         return f"保存失败：{e}", None
-    size_txt = f"{img.width}x{img.height}"
-    msg = f"已保存 {size_txt} → {out_path}"
+
+    deleted = ""
+    if delete_source:
+        src = (source_path or "").strip().strip('"')
+        if src and os.path.isfile(src) and os.path.abspath(src) != os.path.abspath(out_path):
+            try:
+                os.remove(src)
+                deleted = "（已删除源文件）"
+            except OSError as e:
+                log.warning("Could not delete source %s: %s", src, e)
+                deleted = f"（删除源文件失败：{e}）"
+        elif not src:
+            deleted = "（未填写图片路径，跳过删除源文件）"
+
+    msg = f"已保存 {out.width}×{out.height} → {out_path}{deleted}"
     log.info(msg)
     return msg, out_path
 
@@ -195,28 +248,97 @@ def gradio_single_crop_tab(
 
     with gr.Tab("单独裁剪"):
         gr.Markdown(
-            "单图交互式裁剪：上传图片，使用编辑器中的 ✂️ **裁剪工具**"
-            "（或 🔍 缩放），然后点击**保存**。"
-            "比例锁定会约束裁剪工具的形状；如需要，保存时可按比例居中裁剪兜底。"
+            "单图无拉伸裁剪：**点击图片移动绿色裁剪框**（框比例锁定为目标分辨率，绝不变形），"
+            "保存时先按比例裁剪、再缩放到目标分辨率。"
+            "未点击时按**自动检测焦点**（或居中）放置裁剪框；滑块可微调。"
         )
+
+        center_state = gr.State(None)
 
         with gr.Row(equal_height=False):
             with gr.Column(scale=3, min_width=320):
-                editor = gr.ImageEditor(
-                    label="裁剪编辑器（✂ 裁剪 / 🔍 缩放）",
-                    sources=("upload", "clipboard"),
-                    transforms=("crop", "resize"),
-                    crop_size="custom",
-                    canvas_size=(900, 700),
-                    height=620,
+                gr.Markdown("#### 图片（点击移动裁剪框）")
+                input_image = gr.Image(
+                    label="输入图片（上传 / 粘贴 / 点击定位）",
                     type="pil",
-                    layers=False,
-                    brush=False,
-                    eraser=False,
-                    format="png",
+                    sources=("upload", "clipboard"),
+                    height=520,
+                    interactive=True,
                 )
+                source_path = gr.Textbox(
+                    label="图片路径（可选，用于加载与删除源文件）",
+                    placeholder=r"D:/pics/foo.png",
+                )
+                with gr.Row():
+                    load_path_btn = gr.Button("从路径加载", visible=not headless)
+                    reset_btn = gr.Button("重置设置", visible=not headless)
+
+                gr.Markdown("#### 预览（绿框 = 裁剪区域）")
+                box_preview = gr.Image(label="整图 + 裁剪框", interactive=False, height=340)
+                result_preview = gr.Image(label="结果预览", interactive=False, height=300)
+                box_info = gr.Textbox(label="裁剪信息", interactive=False, lines=1)
 
             with gr.Column(scale=2, min_width=260):
+                gr.Markdown("#### 缩放 / 裁剪")
+                mode = gr.Radio(
+                    choices=[MODE_TARGET, MODE_REGION],
+                    value=MODE_TARGET,
+                    label="裁剪模式",
+                )
+
+                preset = gr.Dropdown(
+                    choices=[PRESET_CUSTOM] + RESOLUTION_PRESETS,
+                    value=DEFAULT_PRESET,
+                    label="常用分辨率预设",
+                )
+
+                with gr.Row():
+                    out_w = gr.Number(value=1536, precision=0, label="宽度（px）")
+                    auto_w = gr.Checkbox(label="自动宽度", value=False)
+                with gr.Row():
+                    out_h = gr.Number(value=1536, precision=0, label="高度（px）")
+                    auto_h = gr.Checkbox(label="自动高度", value=False)
+
+                with gr.Row():
+                    ratio_w = gr.Number(value=1, precision=0, label="比例 W")
+                    ratio_h = gr.Number(value=1, precision=0, label="比例 H")
+
+                high_q = gr.Checkbox(label="高质量缩放（Lanczos）", value=True)
+                auto_focal = gr.Checkbox(
+                    label="自动检测焦点（边缘能量分析；未点击图片时生效）",
+                    value=True,
+                )
+                no_resize = gr.Checkbox(
+                    label="不缩放（仅按比例裁剪；输出尺寸不定）",
+                    value=False,
+                )
+
+                gr.Markdown("##### 手动焦点微调（基于当前裁剪框）")
+                shift_x = gr.Slider(-20, 20, value=0, step=0.5, label="水平偏移 %（相对图片宽度）")
+                shift_y = gr.Slider(-20, 20, value=0, step=0.5, label="垂直偏移 %（相对图片高度）")
+
+                with gr.Accordion("进阶：自定义区域（%）", open=False):
+                    gr.Markdown("对图片应用相同的百分比裁剪（旧模式）。")
+                    left_pct = gr.Slider(0, 90, value=0, step=0.5, label="左侧偏移 %")
+                    top_pct = gr.Slider(0, 90, value=0, step=0.5, label="顶部偏移 %")
+                    crop_w_pct = gr.Slider(10, 100, value=100, step=0.5, label="裁剪宽度 %")
+                    crop_h_pct = gr.Slider(10, 100, value=100, step=0.5, label="裁剪高度 %")
+
+                with gr.Accordion("重命名与 PNG（前缀 + 序号）", open=False):
+                    rename_png = gr.Checkbox(
+                        label="重命名并保存为 PNG（前缀 + 序号，如 Pic1.png）",
+                        value=False,
+                    )
+                    name_prefix = gr.Textbox(
+                        label="文件名前缀",
+                        value="image",
+                        placeholder="如 Pic → Pic1.png、Pic2.png …",
+                    )
+                    delete_source = gr.Checkbox(
+                        label="保存成功后删除源文件（危险；需填写图片路径）",
+                        value=False,
+                    )
+
                 gr.Markdown("#### 保存")
                 output_folder = gr.Textbox(
                     label="输出文件夹",
@@ -226,59 +348,252 @@ def gradio_single_crop_tab(
                 with gr.Row():
                     out_browse = gr.Button("📂 输出", elem_classes=["tool"], visible=not headless)
                 filename = gr.Textbox(
-                    label="文件名（不含扩展名）",
+                    label="文件名（不含扩展名；未启用重命名时使用）",
                     value="cropped",
                     placeholder="例如：my_image",
                 )
                 out_format = gr.Radio(choices=["PNG", "JPG"], value="PNG", label="格式")
-                flatten_bg = gr.Checkbox(
-                    label="透明背景拍平为白色",
-                    value=True,
-                )
-
-                with gr.Accordion("裁剪后缩放", open=False):
-                    do_resize = gr.Checkbox(label="缩放输出图片", value=False)
-                    with gr.Row():
-                        target_w = gr.Number(value=1024, precision=0, label="宽度（px，0 = 自动）")
-                        target_h = gr.Number(value=1024, precision=0, label="高度（px，0 = 自动）")
-                    resize_fit = gr.Radio(
-                        choices=[FIT_STRETCH, FIT_COVER, FIT_CONTAIN],
-                        value=FIT_STRETCH,
-                        label="填充方式",
-                    )
-                    high_q = gr.Checkbox(label="高质量缩放（Lanczos）", value=True)
-
-                with gr.Accordion("比例助手（按比例居中裁剪）", open=False):
-                    gr.Markdown(
-                        "编辑器的裁剪工具是自由形状。"
-                        "如需精确比例，可在保存时将结果居中裁剪到指定比例。"
-                    )
-                    ratio_choice = gr.Radio(
-                        choices=RATIO_CHOICES,
-                        value=RATIO_FREE,
-                        label="宽高比",
-                    )
+                flatten_bg = gr.Checkbox(label="透明背景拍平为白色", value=True)
 
                 save_btn = gr.Button("保存裁剪结果", variant="primary", visible=not headless)
                 status = gr.Textbox(label="状态", interactive=False, lines=2)
                 result_file = gr.File(label="已保存文件", interactive=False)
 
+        # --- handlers (same conventions as the batch tab) ---
+
+        def _update_preview(im, center, m, lp_, tp_, wp_, hp_, tw_, th_, hq, af, sx, sy, nr):
+            mk = MODE_REGION if m == MODE_REGION else MODE_TARGET
+            return _render(
+                im, center, mk, lp_, tp_, wp_, hp_,
+                float(tw_ or 1024), float(th_ or 1024), hq, af, sx, sy, nr,
+            )
+
+        def on_image_select(evt: gr.SelectData, im, center, m, lp_, tp_, wp_, hp_, tw_, th_, hq, af, sx, sy, nr):
+            idx = getattr(evt, "index", None)
+            if im is not None and isinstance(idx, (list, tuple)) and len(idx) == 2:
+                try:
+                    center = (int(idx[0]), int(idx[1]))
+                except (TypeError, ValueError):
+                    pass
+            mk = MODE_REGION if m == MODE_REGION else MODE_TARGET
+            return (center,) + _render(
+                im, center, mk, lp_, tp_, wp_, hp_,
+                float(tw_ or 1024), float(th_ or 1024), hq, af, sx, sy, nr,
+            )
+
+        def on_image_change(im, center, m, lp_, tp_, wp_, hp_, tw_, th_, hq, af, sx, sy, nr):
+            mk = MODE_REGION if m == MODE_REGION else MODE_TARGET
+            return (None,) + _render(
+                im, None, mk, lp_, tp_, wp_, hp_,
+                float(tw_ or 1024), float(th_ or 1024), hq, af, sx, sy, nr,
+            )
+
+        def apply_preset(choice):
+            w, h = _parse_preset(choice)
+            if w is None or h is None:
+                return gr.update(), gr.update()
+            return gr.update(value=w), gr.update(value=h)
+
+        def load_from_path(path):
+            p = (path or "").strip().strip('"')
+            if not p or not os.path.isfile(p):
+                return None, "路径无效，未找到文件。"
+            try:
+                im = Image.open(p)
+                im.load()
+            except OSError as e:
+                return None, f"打开失败：{e}"
+            return im, f"已加载 {os.path.basename(p)}（{im.width}×{im.height}px）"
+
+        def reset_settings():
+            return (
+                None,
+                1536,
+                1536,
+                1,
+                1,
+                False,
+                False,
+                True,
+                False,
+                True,
+                0,
+                0,
+                0,
+                0,
+                100,
+                100,
+                MODE_TARGET,
+                DEFAULT_PRESET,
+            )
+
+        def recompute_w_from_h(h, rw, rh, use_auto_w: bool):
+            if not use_auto_w or rh <= 0:
+                return gr.update()
+            return gr.update(value=int(round(float(h) * float(rw) / float(rh))))
+
+        def recompute_h_from_w(w, rw, rh, use_auto_h: bool):
+            if not use_auto_h or rw <= 0:
+                return gr.update()
+            return gr.update(value=int(round(float(w) * float(rh) / float(rw))))
+
+        def ratio_to_height(w, rw, rh):
+            if rw <= 0 or rh <= 0:
+                return gr.update()
+            return gr.update(value=int(round(float(w) * float(rh) / float(rw))))
+
+        def toggle_auto_w(checked):
+            if checked:
+                return gr.update(value=False)
+            return gr.update()
+
+        def toggle_auto_h(checked):
+            if checked:
+                return gr.update(value=False)
+            return gr.update()
+
+        # --- events ---
+
         out_browse.click(fn=get_folder_path, inputs=output_folder, outputs=output_folder)
+        load_path_btn.click(fn=load_from_path, inputs=source_path, outputs=[input_image, status])
+
+        preview_inputs = [
+            input_image,
+            center_state,
+            mode,
+            left_pct,
+            top_pct,
+            crop_w_pct,
+            crop_h_pct,
+            out_w,
+            out_h,
+            high_q,
+            auto_focal,
+            shift_x,
+            shift_y,
+            no_resize,
+        ]
+
+        for comp in (
+            mode,
+            left_pct,
+            top_pct,
+            crop_w_pct,
+            crop_h_pct,
+            out_w,
+            out_h,
+            high_q,
+            auto_focal,
+            shift_x,
+            shift_y,
+            no_resize,
+        ):
+            comp.change(
+                fn=_update_preview,
+                inputs=preview_inputs,
+                outputs=[box_preview, result_preview, box_info],
+            )
+
+        input_image.select(
+            fn=on_image_select,
+            inputs=preview_inputs,
+            outputs=[center_state, box_preview, result_preview, box_info],
+        )
+        input_image.upload(
+            fn=on_image_change,
+            inputs=preview_inputs,
+            outputs=[center_state, box_preview, result_preview, box_info],
+        )
+        input_image.change(
+            fn=on_image_change,
+            inputs=preview_inputs,
+            outputs=[center_state, box_preview, result_preview, box_info],
+        )
+        input_image.clear(
+            fn=on_image_change,
+            inputs=preview_inputs,
+            outputs=[center_state, box_preview, result_preview, box_info],
+        )
+
+        preset.change(fn=apply_preset, inputs=preset, outputs=[out_w, out_h])
+
+        auto_w.change(fn=toggle_auto_w, inputs=auto_w, outputs=auto_h)
+        auto_h.change(fn=toggle_auto_h, inputs=auto_h, outputs=auto_w)
+
+        out_h.change(
+            fn=recompute_w_from_h,
+            inputs=[out_h, ratio_w, ratio_h, auto_w],
+            outputs=out_w,
+        )
+        out_w.change(
+            fn=recompute_h_from_w,
+            inputs=[out_w, ratio_w, ratio_h, auto_h],
+            outputs=out_h,
+        )
+        ratio_w.change(
+            fn=ratio_to_height,
+            inputs=[out_w, ratio_w, ratio_h],
+            outputs=out_h,
+        )
+        ratio_h.change(
+            fn=ratio_to_height,
+            inputs=[out_w, ratio_w, ratio_h],
+            outputs=out_h,
+        )
+
+        reset_btn.click(
+            fn=reset_settings,
+            outputs=[
+                center_state,
+                out_w,
+                out_h,
+                ratio_w,
+                ratio_h,
+                auto_w,
+                auto_h,
+                auto_focal,
+                no_resize,
+                high_q,
+                shift_x,
+                shift_y,
+                left_pct,
+                top_pct,
+                crop_w_pct,
+                crop_h_pct,
+                mode,
+                preset,
+            ],
+        ).then(
+            fn=_update_preview,
+            inputs=preview_inputs,
+            outputs=[box_preview, result_preview, box_info],
+        )
 
         save_btn.click(
-            fn=_save_image,
+            fn=_save_single,
             inputs=[
-                editor,
+                input_image,
+                center_state,
+                mode,
+                left_pct,
+                top_pct,
+                crop_w_pct,
+                crop_h_pct,
+                out_w,
+                out_h,
+                high_q,
+                auto_focal,
+                shift_x,
+                shift_y,
+                no_resize,
                 output_folder,
                 filename,
                 out_format,
                 flatten_bg,
-                target_w,
-                target_h,
-                resize_fit,
-                do_resize,
-                high_q,
-                ratio_choice,
+                rename_png,
+                name_prefix,
+                delete_source,
+                source_path,
             ],
             outputs=[status, result_file],
         )
