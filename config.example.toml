@@ -1,0 +1,14 @@
+# Copy this file to config.toml and adjust the paths.
+# Every key is optional — missing keys fall back to <project>/data and <project>/outputs.
+
+[utilities]
+dataset_tag_manager_dir = ""
+
+batch_crop_input = ""
+batch_crop_output = ""
+
+video_extract_input = ""
+video_extract_output = ""
+
+runninghub_input = ""
+runninghub_output_dir = ""

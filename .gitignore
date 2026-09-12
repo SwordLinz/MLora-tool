@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# App data & outputs
+data/
+outputs/
+setup.log
+
+# Local config
+config.toml
+
+# Gradio
+.gradio/
+
+# Test / tool caches
+.pytest_cache/
+.zcode/
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
