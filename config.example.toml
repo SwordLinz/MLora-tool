@@ -7,6 +7,8 @@ dataset_tag_manager_dir = ""
 batch_crop_input = ""
 batch_crop_output = ""
 
+single_crop_output = ""
+
 video_extract_input = ""
 video_extract_output = ""
 

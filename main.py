@@ -4,6 +4,7 @@ Standalone dataset toolset extracted from Kohya-MauveLinz.
 Tabs:
 - Dataset Tag Manager
 - Batch Crop
+- Single Crop
 - Video to Images
 - RunningHub batch
 """
@@ -17,6 +18,7 @@ import gradio as gr
 from app.class_gui_config import KohyaSSGUIConfig
 from app.dataset_tag_manager_gui import gradio_dataset_tag_manager_tab
 from app.batch_crop_gui import gradio_batch_crop_tab
+from app.single_crop_gui import gradio_single_crop_tab
 from app.video_extract_gui import gradio_video_extract_tab
 from app.runninghub_batch_gui import gradio_runninghub_batch_tab
 
@@ -24,20 +26,22 @@ from app.runninghub_batch_gui import gradio_runninghub_batch_tab
 def build_demo(headless: bool = False, config: KohyaSSGUIConfig | None = None) -> gr.Blocks:
     cfg = config or KohyaSSGUIConfig()
     with gr.Blocks() as demo:
-        gr.Markdown("# Dataset Toolbox")
-        with gr.Tab("Dataset Tag Manager"):
+        gr.Markdown("# 数据集工具箱")
+        with gr.Tab("标签管理"):
             gradio_dataset_tag_manager_tab(headless=headless, config=cfg)
-        with gr.Tab("Batch Crop"):
+        with gr.Tab("批量裁剪"):
             gradio_batch_crop_tab(headless=headless, config=cfg)
-        with gr.Tab("Video to Images"):
+        with gr.Tab("单独裁剪"):
+            gradio_single_crop_tab(headless=headless, config=cfg)
+        with gr.Tab("视频抽帧"):
             gradio_video_extract_tab(headless=headless, config=cfg)
-        with gr.Tab("RunningHub batch"):
+        with gr.Tab("RunningHub 批量"):
             gradio_runninghub_batch_tab(headless=headless, config=cfg)
     return demo
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Dataset toolbox (tag manager / batch crop / video extract / RunningHub batch)")
+    parser = argparse.ArgumentParser(description="Dataset toolbox (tag manager / batch crop / single crop / video extract / RunningHub batch)")
     parser.add_argument("--headless", action="store_true", help="Hide browse/run buttons (for automated environments)")
     parser.add_argument("--config", default="./config.toml", help="Path to TOML config file")
     parser.add_argument("--listen", action="store_true", help="Listen on 0.0.0.0 instead of 127.0.0.1")

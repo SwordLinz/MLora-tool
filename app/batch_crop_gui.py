@@ -37,6 +37,10 @@ def _list_images(folder: str) -> List[str]:
     return out
 
 
+MODE_TARGET = "目标尺寸（BIRME）"
+MODE_REGION = "自定义区域（%）"
+
+
 def _crop_from_percent(
     im: Image.Image, lp: float, tp: float, wp: float, hp: float
 ) -> Tuple[int, int, int, int, Image.Image]:
@@ -184,7 +188,7 @@ def _preview_with_box(
     tw_i = max(1, int(round(float(tw or 1024))))
     th_i = max(1, int(round(float(th or 1024))))
 
-    if mode == "Custom region (%)":
+    if mode == MODE_REGION:
         _l, _t, _w, _h, _c = _crop_from_percent(im, lp, tp, wp, hp)
         vis = im.copy()
         if show_box:
@@ -234,7 +238,7 @@ def _process_one_image(
     shift_y: float,
     no_resize: bool,
 ) -> Image.Image:
-    if mode == "Custom region (%)":
+    if mode == MODE_REGION:
         _l, _t, _w, _h, cropped = _crop_from_percent(im, lp, tp, wp, hp)
         if no_resize:
             return cropped
@@ -276,13 +280,13 @@ def _process_all(
     input_dir = (input_dir or "").strip().strip('"')
     output_dir = (output_dir or "").strip().strip('"')
     if not input_dir or not os.path.isdir(input_dir):
-        return "Invalid input folder."
+        return "输入文件夹无效。"
     if not output_dir:
-        return "Set output folder."
+        return "请设置输出文件夹。"
     os.makedirs(output_dir, exist_ok=True)
     paths = _list_images(input_dir)
     if not paths:
-        return "No images found in input folder."
+        return "输入文件夹中未找到图片。"
     tw_i = max(1, int(round(float(tw or 1024))))
     th_i = max(1, int(round(float(th or 1024))))
     prefix = (name_prefix or "").strip() or "image"
@@ -341,8 +345,8 @@ def _process_all(
             log.warning("Save failed %s: %s", path, e)
     extra = ""
     if rename_png:
-        extra = f" (PNG + rename as {prefix}1.png …)"
-    msg = f"Saved {n_ok}/{len(paths)} image(s) to {output_dir}{extra}"
+        extra = f"（PNG 重命名为 {prefix}1.png …）"
+    msg = f"已保存 {n_ok}/{len(paths)} 张图片到 {output_dir}{extra}"
     log.info(msg)
     return msg
 
@@ -364,34 +368,33 @@ def gradio_batch_crop_tab(
     default_in = cfg.get("utilities.batch_crop_input", os.path.join(scriptdir, "data"))
     default_out = cfg.get("utilities.batch_crop_output", os.path.join(scriptdir, "outputs", "batch_crop"))
 
-    with gr.Tab("Batch Crop"):
+    with gr.Tab("批量裁剪"):
         gr.Markdown(
-            "BIRME-style batch resize/crop: **thumbnail grid** + **large preview**. "
-            "Set target **width / height** and **ratio**, optional **auto width/height**, "
-            "**auto focal** (edge-based crop), and **no resize** (crop only). "
-            "Advanced: **custom region %** for the same rectangle on every image."
+            "BIRME 风格批量缩放/裁剪：**缩略图网格** + **大图预览**。"
+            "设置目标**宽 / 高**和**比例**，可选**自动宽/高**、**自动焦点**（基于边缘能量的裁剪）和**不缩放**（仅裁剪）。"
+            "进阶：**自定义区域 %** 对每张图片应用相同的矩形。"
         )
 
         with gr.Row(equal_height=False):
             with gr.Column(scale=3, min_width=320):
-                gr.Markdown("#### Image list")
-                input_folder = gr.Textbox(label="Input folder", value=default_in or "", placeholder="Folder with images")
+                gr.Markdown("#### 图片列表")
+                input_folder = gr.Textbox(label="输入文件夹", value=default_in or "", placeholder="包含图片的文件夹")
                 output_folder = gr.Textbox(
-                    label="Output folder (default save location)",
+                    label="输出文件夹（默认保存位置）",
                     value=default_out or "",
-                    placeholder="Processed images saved here",
+                    placeholder="处理后的图片保存到这里",
                 )
                 with gr.Row():
                     in_browse = gr.Button("📂", elem_classes=["tool"], visible=not headless)
-                    out_browse = gr.Button("📂 out", elem_classes=["tool"], visible=not headless)
-                    scan_btn = gr.Button("Scan folder", variant="primary", visible=not headless)
-                gr.Markdown("*Re-scan the folder after you add or remove files.*")
+                    out_browse = gr.Button("📂 输出", elem_classes=["tool"], visible=not headless)
+                    scan_btn = gr.Button("扫描文件夹", variant="primary", visible=not headless)
+                gr.Markdown("*添加或删除文件后请重新扫描。*")
 
                 image_paths = gr.State([])
                 selected_idx = gr.State(0)
 
                 thumb_gallery = gr.Gallery(
-                    label="Thumbnails (click for large preview)",
+                    label="缩略图（点击查看大图预览）",
                     columns=4,
                     rows=2,
                     height=420,
@@ -402,88 +405,88 @@ def gradio_batch_crop_tab(
                     allow_preview=True,
                 )
 
-                gr.Markdown("#### Large preview (green = crop region)")
+                gr.Markdown("#### 大图预览（绿框 = 裁剪区域）")
                 preview = gr.Image(
-                    label="Preview (green box = crop area)",
+                    label="预览（绿框 = 裁剪区域）",
                     type="pil",
                     interactive=False,
                     height=380,
                 )
-                preview_zoom = gr.Slider(0.2, 4.0, value=1.0, step=0.05, label="Preview zoom (display only)")
-                show_box = gr.Checkbox(label="Show crop box overlay", value=True)
+                preview_zoom = gr.Slider(0.2, 4.0, value=1.0, step=0.05, label="预览缩放（仅显示）")
+                show_box = gr.Checkbox(label="显示裁剪框叠加", value=True)
 
             with gr.Column(scale=2, min_width=260):
-                gr.Markdown("#### Resize / Crop")
+                gr.Markdown("#### 缩放 / 裁剪")
                 mode = gr.Radio(
-                    choices=["Target size (BIRME)", "Custom region (%)"],
-                    value="Target size (BIRME)",
-                    label="Crop mode",
+                    choices=[MODE_TARGET, MODE_REGION],
+                    value=MODE_TARGET,
+                    label="裁剪模式",
                 )
 
                 with gr.Row():
-                    out_w = gr.Number(value=1024, precision=0, label="Width (px)")
-                    auto_w = gr.Checkbox(label="Auto width", value=False)
+                    out_w = gr.Number(value=1024, precision=0, label="宽度（px）")
+                    auto_w = gr.Checkbox(label="自动宽度", value=False)
                 with gr.Row():
-                    out_h = gr.Number(value=1280, precision=0, label="Height (px)")
-                    auto_h = gr.Checkbox(label="Auto height", value=False)
+                    out_h = gr.Number(value=1280, precision=0, label="高度（px）")
+                    auto_h = gr.Checkbox(label="自动高度", value=False)
 
                 with gr.Row():
-                    ratio_w = gr.Number(value=4, precision=0, label="Ratio W")
-                    ratio_h = gr.Number(value=5, precision=0, label="Ratio H")
+                    ratio_w = gr.Number(value=4, precision=0, label="比例 W")
+                    ratio_h = gr.Number(value=5, precision=0, label="比例 H")
 
-                high_q = gr.Checkbox(label="High-quality resize (Lanczos)", value=True)
+                high_q = gr.Checkbox(label="高质量缩放（Lanczos）", value=True)
                 auto_focal = gr.Checkbox(
-                    label="Auto detect focal point (edge-based, per image)",
+                    label="自动检测焦点（逐��边缘能量分析）",
                     value=True,
                 )
                 no_resize = gr.Checkbox(
-                    label="Do not resize (crop to aspect only; output size varies)",
+                    label="不缩放（仅按比例裁剪；输出尺寸不定）",
                     value=False,
                 )
 
-                gr.Markdown("##### Manual focal nudge (from computed crop)")
-                shift_x = gr.Slider(-20, 20, value=0, step=0.5, label="Shift X % of image width")
-                shift_y = gr.Slider(-20, 20, value=0, step=0.5, label="Shift Y % of image height")
+                gr.Markdown("##### 手动焦点微调（基于计算的裁剪框）")
+                shift_x = gr.Slider(-20, 20, value=0, step=0.5, label="水平偏移 %（相对图片宽度）")
+                shift_y = gr.Slider(-20, 20, value=0, step=0.5, label="垂直偏移 %（相对图片高度）")
 
-                with gr.Accordion("Advanced: custom region (%)", open=False):
-                    gr.Markdown("Same percentage crop on **every** image (legacy mode).")
-                    left_pct = gr.Slider(0, 90, value=0, step=0.5, label="Left offset %")
-                    top_pct = gr.Slider(0, 90, value=0, step=0.5, label="Top offset %")
-                    crop_w_pct = gr.Slider(10, 100, value=100, step=0.5, label="Crop width %")
-                    crop_h_pct = gr.Slider(10, 100, value=100, step=0.5, label="Crop height %")
+                with gr.Accordion("进阶：自定义区域（%）", open=False):
+                    gr.Markdown("对**每张**图片应用相同的百分比裁剪（旧模式）。")
+                    left_pct = gr.Slider(0, 90, value=0, step=0.5, label="左侧偏移 %")
+                    top_pct = gr.Slider(0, 90, value=0, step=0.5, label="顶部偏移 %")
+                    crop_w_pct = gr.Slider(10, 100, value=100, step=0.5, label="裁剪宽度 %")
+                    crop_h_pct = gr.Slider(10, 100, value=100, step=0.5, label="裁剪高度 %")
 
-                with gr.Accordion("Rename & PNG (same logic as train/j2p.py)", open=False):
+                with gr.Accordion("重命名与 PNG（同 train/j2p.py 逻辑）", open=False):
                     rename_png = gr.Checkbox(
-                        label="Rename & save as PNG (prefix + counter, e.g. Pic1.png)",
+                        label="重命名并保存为 PNG（前缀 + 序号，如 Pic1.png）",
                         value=False,
                     )
                     name_prefix = gr.Textbox(
-                        label="Filename prefix",
+                        label="文件名前缀",
                         value="image",
-                        placeholder="e.g. Pic → Pic1.png, Pic2.png …",
+                        placeholder="如 Pic → Pic1.png、Pic2.png …",
                     )
                     delete_source = gr.Checkbox(
-                        label="Delete original files after successful save (dangerous)",
+                        label="保存成功后删除原文件（危险）",
                         value=False,
                     )
 
                 with gr.Row():
-                    reset_btn = gr.Button("Reset settings", visible=not headless)
-                    clear_btn = gr.Button("Clear list", visible=not headless)
+                    reset_btn = gr.Button("重置设置", visible=not headless)
+                    clear_btn = gr.Button("清空列表", visible=not headless)
 
-        run_btn = gr.Button("Save to folder (crop all)", variant="primary", visible=not headless)
-        status = gr.Textbox(label="Status", interactive=False, lines=2)
+        run_btn = gr.Button("保存到文件夹（裁剪全部）", variant="primary", visible=not headless)
+        status = gr.Textbox(label="状态", interactive=False, lines=2)
 
         def _mode_key(m: str) -> str:
-            return "Custom region (%)" if m == "Custom region (%)" else "Target size (BIRME)"
+            return MODE_REGION if m == MODE_REGION else MODE_TARGET
 
         def scan_folder(path, m, lp, tp, wp, hp, tw, th, zoom, show_b, af, sx, sy, nr):
             path = (path or "").strip().strip('"')
             if not path or not os.path.isdir(path):
-                return [], 0, [], "Invalid folder.", None
+                return [], 0, [], "文件夹无效。", None
             paths = _list_images(path)
             if not paths:
-                return [], 0, [], "No images found.", None
+                return [], 0, [], "未找到图片。", None
             gallery_items = [(p, os.path.basename(p)) for p in paths]
             mk = _mode_key(m)
             preview_img = _preview_with_box(
@@ -502,7 +505,7 @@ def gradio_batch_crop_tab(
                 sy,
                 nr,
             )
-            return paths, 0, gallery_items, f"Found {len(paths)} image(s).", preview_img
+            return paths, 0, gallery_items, f"找到 {len(paths)} 张图片。", preview_img
 
         def _path_at(paths: List[str], idx: int) -> str:
             if not paths:
@@ -577,7 +580,7 @@ def gradio_batch_crop_tab(
             )
 
         def clear_list():
-            return [], 0, [], "List cleared. Scan again to load.", None
+            return [], 0, [], "列表已清空，请重新扫描加载。", None
 
         def recompute_w_from_h(h, rw, rh, use_auto_w: bool):
             if not use_auto_w or rh <= 0:
@@ -752,7 +755,7 @@ def gradio_batch_crop_tab(
             sy,
             nr,
         ):
-            mk = "Custom region (%)" if m == "Custom region (%)" else "Target size (BIRME)"
+            mk = MODE_REGION if m == MODE_REGION else MODE_TARGET
             return _process_all(
                 in_dir,
                 out_dir,

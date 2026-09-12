@@ -22,6 +22,11 @@ VIDEO_EXTS = (".mp4", ".avi", ".mkv", ".mov", ".webm", ".wmv", ".flv", ".m4v", "
 _WIN_BAD = set('<>:"/\\|?*\n\r\t')
 
 
+MODE_EVERY_N_FRAMES = "每 N 帧"
+MODE_EVERY_N_SECONDS = "每 N 秒"
+MODE_IMAGES_PER_SECOND = "每秒图片数"
+
+
 def _safe_folder_segment(name: str, max_len: int = 48) -> str:
     """Strip characters invalid in Windows folder names; trim length."""
     s = name.replace("\n", " ").strip()[:max_len]
@@ -111,11 +116,11 @@ def _extract_one_video(
     try:
         import cv2
     except ImportError:
-        return 0, "OpenCV (cv2) is not available."
+        return 0, "OpenCV (cv2) 不可用，请安装 opencv-python。"
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        return 0, f"Cannot open video: {video_path}"
+        return 0, f"无法打开视频：{video_path}"
 
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     if fps <= 0:
@@ -154,7 +159,7 @@ def _extract_one_video(
         else:
             log.warning("Frame write failed (skipped): %s", fpath)
 
-    if mode_key == "Every N frames":
+    if mode_key == MODE_EVERY_N_FRAMES:
         n = max(1, int(round(float(value))))
         while True:
             ret, frame = cap.read()
@@ -163,7 +168,7 @@ def _extract_one_video(
             if frame_idx % n == 0:
                 _write(frame)
             frame_idx += 1
-    elif mode_key == "Every N seconds":
+    elif mode_key == MODE_EVERY_N_SECONDS:
         sec = max(0.01, float(value))
         while True:
             ret, frame = cap.read()
@@ -175,7 +180,7 @@ def _extract_one_video(
                 last_save_time = t
             frame_idx += 1
     else:
-        # Images per second of video (target sample rate)
+        # 每秒图片数（目标采样率）
         rate = max(0.01, float(value))
         interval = max(1, int(round(fps / rate)))
         while True:
@@ -189,8 +194,8 @@ def _extract_one_video(
     cap.release()
     if write_attempts > 0 and saved == 0:
         return 0, (
-            "All frame writes failed (path too long or permission). "
-            "Subfolders now use a short hash name; output also uses Windows long-path mode."
+            "所有帧写入均失败（路径过长或权限不足）。"
+            "子文件夹已使用短哈希名；输出也已启用 Windows 长路径模式。"
         )
     return saved, ""
 
@@ -206,14 +211,14 @@ def _run_batch(
     input_dir = (input_dir or "").strip().strip('"')
     output_dir = (output_dir or "").strip().strip('"')
     if not input_dir or not os.path.isdir(input_dir):
-        return "Invalid input folder."
+        return "输入文件夹无效。"
     if not output_dir:
-        return "Set output folder."
+        return "请设置输出文件夹。"
     os.makedirs(_win_long_path(output_dir), exist_ok=True)
 
     videos = _list_videos(input_dir)
     if not videos:
-        return "No video files found in input folder."
+        return "输入文件夹中未找到视频文件。"
 
     total_saved = 0
     errors: List[str] = []
@@ -224,9 +229,9 @@ def _run_batch(
             errors.append(err)
         log.info("Extracted %s frames from %s", n, os.path.basename(vp))
 
-    msg = f"Done. Saved {total_saved} image(s) from {len(videos)} video(s) → {output_dir}"
+    msg = f"完成。已从 {len(videos)} 个视频保存 {total_saved} 张图片 → {output_dir}"
     if errors:
-        msg += " | Errors: " + "; ".join(errors[:3])
+        msg += " | ��误：" + "；".join(errors[:3])
     return msg
 
 
@@ -238,46 +243,46 @@ def gradio_video_extract_tab(
     default_in = cfg.get("utilities.video_extract_input", os.path.join(scriptdir, "data"))
     default_out = cfg.get("utilities.video_extract_output", os.path.join(scriptdir, "outputs", "video_frames"))
 
-    with gr.Tab("Video to Images"):
+    with gr.Tab("视频抽帧"):
         gr.Markdown(
-            "Extract image sequences from all videos in a folder. "
-            "Use **Every N frames** for fixed step, **Every N seconds** for time-based sampling, "
-            "or **Images per second** to target a frame rate (e.g. 1 ≈ one image per second of video). "
-            "Optional: **subfolder per video** uses a **short name + hash** (not the full filename) so Windows path limits are not exceeded."
+            "从文件夹中的所有视频提取图片序列。"
+            "用 **每 N 帧** 按固定间隔抽帧，**每 N 秒** 按时间间隔采样，"
+            "或 **每秒图片数** 指定目标帧率（如 1 ≈ 视频每秒取一张图）。"
+            "可选：**每个视频一个子文件夹**，使用**短名 + 哈希**（不使用完整文件名），避免超出 Windows 路径长度限制。"
         )
 
-        input_folder = gr.Textbox(label="Input folder (videos)", value=default_in or "", placeholder="Folder containing video files")
+        input_folder = gr.Textbox(label="输入文件夹（视频）", value=default_in or "", placeholder="包含视频文件的文件夹")
         output_folder = gr.Textbox(
-            label="Output folder",
+            label="输出文件夹",
             value=default_out or "",
-            placeholder="Extracted images saved here",
+            placeholder="提取的图片保存到这里",
         )
         with gr.Row():
             in_browse = gr.Button("📂", elem_classes=["tool"], visible=not headless)
-            out_browse = gr.Button("📂 out", elem_classes=["tool"], visible=not headless)
+            out_browse = gr.Button("📂 输出", elem_classes=["tool"], visible=not headless)
 
         subfolder = gr.Checkbox(
-            label="Create subfolder per video (short name + hash; avoids Windows path limit)",
+            label="每个视频创建一个子文件夹（短名 + 哈希；规避 Windows 路径长度限制）",
             value=True,
         )
         mode = gr.Radio(
             choices=[
-                "Every N frames",
-                "Every N seconds",
-                "Images per second of video",
+                MODE_EVERY_N_FRAMES,
+                MODE_EVERY_N_SECONDS,
+                MODE_IMAGES_PER_SECOND,
             ],
-            value="Images per second of video",
-            label="Extraction mode",
+            value=MODE_IMAGES_PER_SECOND,
+            label="抽帧模式",
         )
         value_num = gr.Number(
             value=1.0,
             precision=2,
-            label="Value (N frames / N seconds / images per second, depending on mode)",
+            label="数值（N 帧 / N 秒 / 每秒图片数，取决于所选模式）",
         )
-        img_format = gr.Dropdown(choices=["png", "jpg"], value="png", label="Output image format")
+        img_format = gr.Dropdown(choices=["png", "jpg"], value="png", label="输出图片格式")
 
-        run_btn = gr.Button("Extract frames", variant="primary", visible=not headless)
-        status = gr.Textbox(label="Status", interactive=False, lines=3)
+        run_btn = gr.Button("开始抽帧", variant="primary", visible=not headless)
+        status = gr.Textbox(label="状态", interactive=False, lines=3)
 
         in_browse.click(fn=get_folder_path, inputs=input_folder, outputs=input_folder)
         out_browse.click(fn=get_folder_path, inputs=output_folder, outputs=output_folder)

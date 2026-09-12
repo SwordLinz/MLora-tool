@@ -134,10 +134,10 @@ def wait_for_outputs(
         code, msg, data = fetch_outputs(api_key, task_id, request_timeout)
         if code == 0:
             if not isinstance(data, list):
-                raise RuntimeError(f"Unexpected outputs data: {data!r}")
+                raise RuntimeError(f"outputs 返回了意外的数据格式：{data!r}")
             if log:
                 elapsed = int(time.monotonic() - started_at)
-                log(f"  outputs ready after {elapsed}s, {len(data)} item(s)")
+                log(f"  输出已就绪，耗时 {elapsed} 秒，共 {len(data)} 个文件")
             if progress:
                 progress("")
             return data
@@ -146,16 +146,16 @@ def wait_for_outputs(
             if progress and elapsed - last_progress_log >= max(10.0, poll_interval):
                 last_progress_log = elapsed
                 progress(
-                    f"  still waiting taskId={task_id}, code={code}, "
-                    f"msg={msg or 'running'}, elapsed={int(elapsed)}s"
+                    f"  仍在等待 taskId={task_id}，code={code}，"
+                    f"状态={msg or '运行中'}，已等待 {int(elapsed)} 秒"
                 )
             if deadline is not None and time.monotonic() > deadline:
-                raise TimeoutError(f"Task {task_id} still {msg} after max wait")
+                raise TimeoutError(f"任务 {task_id} 超时仍未完成，最后状态：{msg}")
             time.sleep(poll_interval)
             continue
         if code == 805:
-            raise RuntimeError(f"Task failed: {msg} data={data!r}")
-        raise RuntimeError(f"outputs API error code={code} msg={msg} data={data!r}")
+            raise RuntimeError(f"任务失败：{msg} data={data!r}")
+        raise RuntimeError(f"outputs API 错误 code={code} msg={msg} data={data!r}")
 
 
 def download_file(url: str, dest: Path, timeout: float) -> None:

@@ -87,7 +87,7 @@ def _format_visible_log(lines: List[str]) -> str:
         return "\n".join(lines)
     hidden = len(lines) - MAX_VISIBLE_LOG_LINES
     visible = lines[-MAX_VISIBLE_LOG_LINES:]
-    return f"... hidden previous {hidden} log lines, showing latest {MAX_VISIBLE_LOG_LINES} ...\n" + "\n".join(visible)
+    return f"... 已隐藏之前 {hidden} 条日志，仅显示最新 {MAX_VISIBLE_LOG_LINES} 条 ...\n" + "\n".join(visible)
 
 
 def _defaults_from_config_and_json(cfg: KohyaSSGUIConfig) -> dict[str, Any]:
@@ -281,7 +281,7 @@ def gradio_runninghub_batch_tab(
     cfg = config or KohyaSSGUIConfig()
     d = _defaults_from_config_and_json(cfg)
 
-    with gr.Tab("RunningHub batch"):
+    with gr.Tab("RunningHub 批量"):
         gr.Markdown(
             "对文件夹内每张图调用 [RunningHub](https://www.runninghub.cn) 云端 ComfyUI 工作流，"
             "生成图片、latent 等输出文件直接保存到下方输出文件夹。需开通 API 并在网页上至少成功运行过该工作流一次。"

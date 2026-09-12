@@ -128,7 +128,7 @@ def _rows_from_counts(pairs: List[Tuple[str, int]], filter_text: str) -> List[Li
 
 def _translate_block(text: str, target: str) -> Tuple[str, str]:
     if not _HAS_TRANSLATOR or not GoogleTranslator:
-        return text, "Install: pip install deep-translator"
+        return text, "请先安装：pip install deep-translator"
     text = text or ""
     if not text.strip():
         return text, ""
@@ -162,14 +162,14 @@ def _batch_add_tag_apply(
     root = (root or "").strip().strip('"')
     tag = (tag or "").strip()
     if not root or not os.path.isdir(root):
-        return "Invalid folder.", [], []
+        return "文件夹无效。", [], []
     if not tag:
-        return "Enter a tag to add.", [], []
-    pos = (position_label or "").lower()
-    top = pos.startswith("top") or "beginning" in pos or "start" in pos or "front" in pos
+        return "请输入要添加的标签。", [], []
+    pos = (position_label or "")
+    top = "开头" in pos or "最前" in pos or "前" in pos[:2]
     paths = _list_caption_files(root, ext)
     if not paths:
-        return f"No *{ext} caption files in folder.", [], []
+        return f"文件夹中没有 *{ext} 标签文件。", [], []
     changed = 0
     skipped = 0
     for path in paths:
@@ -184,8 +184,8 @@ def _batch_add_tag_apply(
     pairs = _global_tag_counts(root, ext)
     rows = _rows_from_counts(pairs, "")
     msg = (
-        f"Batch add: {changed} file(s) updated, {skipped} skipped (tag already present). "
-        f"Position: {'beginning' if top else 'end'}."
+        f"批量添加：已更新 {changed} 个文件，跳过 {skipped} 个（标签已存在）。"
+        f"插入位置：{'开头' if top else '结尾'}。"
     )
     log.info(msg)
     return msg, pairs, rows
@@ -200,12 +200,12 @@ def _batch_remove_tags_apply(
     root = (root or "").strip().strip('"')
     tags_to_remove = set(_parse_batch_tags(tags_text))
     if not root or not os.path.isdir(root):
-        return "Invalid folder.", [], []
+        return "文件夹无效。", [], []
     if not tags_to_remove:
-        return "Enter one or more tags to remove.", [], []
+        return "请输入要移除的一个或多个标签。", [], []
     paths = _list_caption_files(root, ext)
     if not paths:
-        return f"No *{ext} caption files in folder.", [], []
+        return f"文件夹中没有 *{ext} 标签文件。", [], []
 
     changed = 0
     removed = 0
@@ -223,8 +223,8 @@ def _batch_remove_tags_apply(
     pairs = _global_tag_counts(root, ext)
     rows = _rows_from_counts(pairs, "")
     msg = (
-        f"Batch remove: {removed} tag occurrence(s) removed from {changed} file(s). "
-        f"Tags: {', '.join(sorted(tags_to_remove, key=str.lower))}."
+        f"批量移除：从 {changed} 个文件中移除了 {removed} 处标签。"
+        f"标签：{', '.join(sorted(tags_to_remove, key=str.lower))}。"
     )
     log.info(msg)
     return msg, pairs, rows
@@ -237,27 +237,27 @@ def gradio_dataset_tag_manager_tab(
     cfg = config or KohyaSSGUIConfig()
     default_dir = cfg.get("utilities.dataset_tag_manager_dir", os.path.join(scriptdir, "data"))
 
-    with gr.Tab("Dataset Tag Manager"):
+    with gr.Tab("标签管理"):
         gr.Markdown(
-            "Browse a folder of images with matching caption files (`.txt` / `.caption`). "
-            "Left: thumbnails; center: tags for the selected image; right: tag frequency across all caption files. "
-            "Tags are saved as comma-separated text (kohya / danbooru style)."
+            "浏览带有同名标签文件的图片文件夹（`.txt` / `.caption`）。"
+            "左栏：缩略图；中栏：所选图片的标签；右栏：全部标签文件的标签频率统计。"
+            "标签以逗号分隔文本保存（kohya / danbooru 风格）。"
         )
 
         folder = gr.Textbox(
-            label="Dataset folder",
+            label="数据集文件夹",
             value=default_dir or "",
-            placeholder="Folder containing images and caption files",
+            placeholder="包含图片和标签文件的文件夹",
         )
         caption_ext = gr.Dropdown(
             choices=[".txt", ".caption"],
             value=".txt",
-            label="Caption extension",
+            label="标签文件扩展名",
         )
         with gr.Row():
             browse = gr.Button("📂", elem_classes=["tool"], visible=not headless)
-            refresh = gr.Button("Refresh", visible=not headless)
-        status = gr.Textbox(label="Status", lines=1, interactive=False)
+            refresh = gr.Button("刷新", visible=not headless)
+        status = gr.Textbox(label="状态", lines=1, interactive=False)
 
         image_paths_state = gr.State([])
         selected_index = gr.State(None)
@@ -265,107 +265,107 @@ def gradio_dataset_tag_manager_tab(
 
         with gr.Row():
             with gr.Column(scale=2, min_width=200):
-                gr.Markdown("### Dataset")
+                gr.Markdown("### 数据集")
                 gallery = gr.Gallery(
-                    label="Images",
+                    label="图片",
                     columns=4,
                     height=420,
                     object_fit="contain",
                     allow_preview=True,
                     show_label=True,
                 )
-                gallery_cols = gr.Slider(2, 8, value=4, step=1, label="Thumbnail columns")
-                showing = gr.Textbox(label="Selection", interactive=False, lines=1)
+                gallery_cols = gr.Slider(2, 8, value=4, step=1, label="缩略图列数")
+                showing = gr.Textbox(label="当前选中", interactive=False, lines=1)
 
             with gr.Column(scale=2, min_width=220):
-                gr.Markdown("### Image tags")
+                gr.Markdown("### 图片标签")
                 current_tags = gr.Textbox(
-                    label="Tags for selected image (comma or one per line)",
+                    label="所选图片的标签（逗号分隔或每行一个）",
                     lines=18,
-                    placeholder="e.g. 1girl, solo, smile",
+                    placeholder="例如：1girl, solo, smile",
                 )
                 with gr.Row():
-                    save_btn = gr.Button("Save to caption file", variant="primary", visible=not headless)
-                    reload_btn = gr.Button("Reload from file", visible=not headless)
+                    save_btn = gr.Button("保存到标签文件", variant="primary", visible=not headless)
+                    reload_btn = gr.Button("从文件重新加载", visible=not headless)
                 with gr.Row():
-                    add_box = gr.Textbox(show_label=False, placeholder="New tag to add", scale=3)
-                    add_btn = gr.Button("Add", visible=not headless)
+                    add_box = gr.Textbox(show_label=False, placeholder="要添加的新标签", scale=3)
+                    add_btn = gr.Button("添加", visible=not headless)
                 with gr.Row():
-                    del_box = gr.Textbox(show_label=False, placeholder="Tag to remove (exact match)", scale=3)
-                    del_btn = gr.Button("Remove", visible=not headless)
-                dedupe_btn = gr.Button("Remove duplicate tags", visible=not headless)
+                    del_box = gr.Textbox(show_label=False, placeholder="要移除的标签（精确匹配）", scale=3)
+                    del_btn = gr.Button("移除", visible=not headless)
+                dedupe_btn = gr.Button("去除重复标签", visible=not headless)
                 with gr.Row():
                     tgt_lang = gr.Dropdown(
                         choices=["zh-CN", "zh-TW", "ja", "en", "ko"],
                         value="zh-CN",
-                        label="Translate target",
+                        label="翻译目标语言",
                     )
-                    trans_btn = gr.Button("Translate tags", visible=not headless)
-                trans_info = gr.Textbox(label="Translation note", lines=1, interactive=False)
+                    trans_btn = gr.Button("翻译标签", visible=not headless)
+                trans_info = gr.Textbox(label="翻译提示", lines=1, interactive=False)
 
             with gr.Column(scale=2, min_width=220):
-                gr.Markdown("### All tags (dataset)")
-                filter_g = gr.Textbox(label="Filter tags (contains)", placeholder="substring…")
+                gr.Markdown("### 全部标签（数据集）")
+                filter_g = gr.Textbox(label="过滤标签（包含）", placeholder="输入关键字…")
                 global_table = gr.Dataframe(
-                    headers=["tag", "count"],
+                    headers=["标签", "次数"],
                     datatype=["str", "number"],
-                    label="Tag statistics",
+                    label="标签统计",
                     interactive=False,
                     wrap=True,
                 )
-                refilter = gr.Button("Apply filter", visible=not headless)
+                refilter = gr.Button("应用过滤", visible=not headless)
 
-                with gr.Accordion("Batch add tag", open=False):
+                with gr.Accordion("批量添加标签", open=False):
                     gr.Markdown(
-                        "All caption files in folder · same extension as above. "
-                        "**Top** = prepend, **Bottom** = append. Skip = leave file unchanged if tag exists."
+                        "作用于文件夹内全部标签文件 · 扩展名与上方一致。"
+                        "**开头** = 插入最前，**结尾** = 追加最后。跳过 = 文件中已有该标签时不修改。"
                     )
                     batch_tag = gr.Textbox(
-                        label="Tag to add",
-                        placeholder="e.g. masterpiece",
+                        label="要添加的标签",
+                        placeholder="例如：masterpiece",
                         lines=1,
                     )
                     batch_pos = gr.Radio(
-                        choices=["Top (beginning)", "Bottom (end)"],
-                        value="Top (beginning)",
-                        label="Adding position",
+                        choices=["开头（最前）", "结尾（最后）"],
+                        value="开头（最前）",
+                        label="插入位置",
                     )
                     batch_skip = gr.Checkbox(
-                        label="Skip if tag already exists",
+                        label="标签已存在时跳过",
                         value=True,
                     )
                     with gr.Row():
                         batch_apply = gr.Button(
-                            "Apply to all",
+                            "应用到全部",
                             variant="primary",
                             visible=not headless,
                             scale=2,
                         )
                         batch_lower = gr.Button(
-                            "Lower case",
+                            "转小写",
                             visible=not headless,
                             scale=1,
                         )
 
-                with gr.Accordion("Batch remove tag", open=False):
+                with gr.Accordion("批量移除标签", open=False):
                     gr.Markdown(
-                        "Remove exact-match tag(s) from all caption files in folder. "
-                        "Use commas or one tag per line for multiple tags."
+                        "从文件夹内全部标签文件中移除精确匹配的标签。"
+                        "多个标签用逗号分隔或每行一个。"
                     )
                     batch_remove_tags = gr.Textbox(
-                        label="Tag(s) to remove",
-                        placeholder="e.g. watermark, blurry",
+                        label="要移除的标签",
+                        placeholder="例如：watermark, blurry",
                         lines=3,
                     )
                     with gr.Row():
                         batch_remove_apply = gr.Button(
-                            "Remove from all",
+                            "从全部文件移除",
                             variant="stop",
                             visible=not headless,
                             scale=2,
                         )
                         batch_remove_lower = gr.Button(
-                            "Lower case",
+                            "转小写",
                             visible=not headless,
                             scale=1,
                         )
@@ -373,11 +373,11 @@ def gradio_dataset_tag_manager_tab(
         def scan_folder(path: str, ext: str):
             path = (path or "").strip().strip('"')
             if not path or not os.path.isdir(path):
-                return [], [], [], "Invalid or empty folder.", [], None
+                return [], [], [], "文件夹无效或为空。", [], None
             imgs = _list_images(path)
             pairs = _global_tag_counts(path, ext)
             rows = _rows_from_counts(pairs, "")
-            msg = f"Loaded {len(imgs)} images, {len(pairs)} unique tags in *{ext} files."
+            msg = f"已加载 {len(imgs)} 张图片，*{ext} 文件中共 {len(pairs)} 个不同标签。"
             log.info(msg)
             return imgs, imgs, rows, msg, pairs, None
 
@@ -394,13 +394,13 @@ def gradio_dataset_tag_manager_tab(
         def on_gallery_select(evt: gr.SelectData, paths: List[str], ext: str):
             idx = _select_index(evt)
             if not paths or idx is None or idx < 0 or idx >= len(paths):
-                return "", "No selection", None
+                return "", "未选中任何图片", None
             ip = paths[idx]
             cap = _caption_path(ip, ext)
             raw = _read_tags_file(cap)
             tags = _join_tags(_parse_tags(raw)) if raw else ""
             base = os.path.basename(ip)
-            return tags, f"Selected: {base} ({idx + 1}/{len(paths)})", idx
+            return tags, f"已选中：{base}（{idx + 1}/{len(paths)}）", idx
 
         def save_current(
             tags: str,
@@ -411,18 +411,18 @@ def gradio_dataset_tag_manager_tab(
         ):
             root = (root or "").strip().strip('"')
             if not paths:
-                return "No dataset loaded.", gr.update(), gr.update()
+                return "尚未加载数据集。", gr.update(), gr.update()
             if idx is None or idx < 0 or idx >= len(paths):
-                return "Select an image in the gallery first.", gr.update(), gr.update()
+                return "请先在图库中选择一张图片。", gr.update(), gr.update()
             if not root or not os.path.isdir(root):
-                return "Invalid dataset folder.", gr.update(), gr.update()
+                return "数据集文件夹无效。", gr.update(), gr.update()
             ip = paths[idx]
             cap = _caption_path(ip, ext)
             normalized = _join_tags(_parse_tags(tags))
             _write_tags_file(cap, normalized)
             pairs = _global_tag_counts(root, ext)
             rows = _rows_from_counts(pairs, "")
-            msg = f"Saved: {os.path.basename(cap)} — stats refreshed."
+            msg = f"已保存：{os.path.basename(cap)} — 统计已刷新。"
             return msg, pairs, rows
 
         def dedupe_tags(tags: str) -> str:
@@ -461,7 +461,7 @@ def gradio_dataset_tag_manager_tab(
 
         def do_translate(tags: str, target: str):
             out, err = _translate_block(tags, target)
-            note = err or ("OK" if _HAS_TRANSLATOR else "deep-translator not installed")
+            note = err or ("完成" if _HAS_TRANSLATOR else "未安装 deep-translator")
             return out, note
 
         def set_gallery_columns(cols: float, imgs: List[str]):
