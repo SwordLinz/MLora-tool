@@ -13,6 +13,7 @@ import gradio as gr
 from .class_gui_config import KohyaSSGUIConfig
 from .common_gui import get_folder_path, scriptdir
 from .custom_logging import setup_logging
+from .gradio_paths import allow_path
 
 log = setup_logging()
 
@@ -375,6 +376,7 @@ def gradio_dataset_tag_manager_tab(
             if not path or not os.path.isdir(path):
                 return [], [], [], "文件夹无效或为空。", [], None
             imgs = _list_images(path)
+            allow_path(path)
             pairs = _global_tag_counts(path, ext)
             rows = _rows_from_counts(pairs, "")
             msg = f"已加载 {len(imgs)} 张图片，*{ext} 文件中共 {len(pairs)} 个不同标签。"

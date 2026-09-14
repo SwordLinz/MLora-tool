@@ -1,14 +1,13 @@
 # Dataset Toolbox
 
-从 [Kohya-MauveLinz](https://github.com/bmaltais/kohya_ss) 独立提取的数据集工具集，包含 5 个 Gradio Tab，不依赖任何训练主流程。
+从 [Kohya-MauveLinz](https://github.com/bmaltais/kohya_ss) 独立提取的数据集工具集，包含 4 个 Gradio Tab，不依赖任何训练主流程。
 
 ## 功能
 
 | Tab | 说明 |
 |---|---|
 | **Dataset Tag Manager** | 三栏式标签管理：图片缩略图 + 单图 tag 编辑（增删/去重/Google 翻译）+ 全局 tag 统计与过滤；支持批量添加/移除 tag（`.txt` / `.caption`） |
-| **Batch Crop** | BIRME 风格批量裁剪缩放：目标尺寸/比例、基于边缘能量的智能焦点裁剪（可选 OpenCV 加速）、手动焦点微调、自定义百分比区域、PNG 重命名 |
-| **Single Crop** | 单图交互式裁剪：编辑器内拖拽裁剪/缩放，可选比例居中裁剪、裁后缩放（拉伸/裁剪补齐/留白填充）、透明背景拍平，输出 png/jpg |
+| **Crop** | 缩放/裁剪（批量 + 单图合并）：扫描文件夹成缩略图网格，或上传/粘贴单张图片；常用分辨率预设（含 2560×1280）、宽高互换、上一张/下一张、目标尺寸/比例、基于边缘能量的智能焦点裁剪（可选 OpenCV 加速）、手动焦点微调、自定义百分比区域、PNG 重命名；可「保存当前图片」或「保存到文件夹（裁剪全部）」 |
 | **Video to Images** | 视频批量抽帧：按帧数/秒数/每秒张数三种模式，输出 png/jpg，每视频一个短名+哈希子文件夹（规避 Windows MAX_PATH） |
 | **RunningHub batch** | 对文件夹内每张图调用 [RunningHub](https://www.runninghub.cn) 云端 ComfyUI 工作流，批量生图并下载到本地 |
 
@@ -46,7 +45,6 @@ python main.py --headless             # 隐藏 📂/运行按钮（自动化环�
 dataset_tag_manager_dir = "D:/datasets/my_lora"
 batch_crop_input = "D:/datasets/raw"
 batch_crop_output = "D:/datasets/cropped"
-single_crop_output = "D:/datasets/cropped"
 video_extract_input = "D:/videos"
 video_extract_output = "D:/datasets/frames"
 runninghub_input = "D:/datasets/raw"
@@ -76,9 +74,8 @@ app/
   custom_logging.py            # rich 日志（原样提取）
   class_gui_config.py          # TOML 配置读取（原样提取）
   dataset_tag_manager_gui.py   # Tab 1（原样提取）
-  batch_crop_gui.py            # Tab 2（原样提取）
-  single_crop_gui.py           # Tab 3（单图交互式裁剪）
-  video_extract_gui.py         # Tab 4（原样提取）
+  crop_gui.py                  # Tab 2（批量 + 单图裁剪合并）
+  video_extract_gui.py         # Tab 3（原样提取）
   runninghub_batch_gui.py      # Tab 4 GUI（仅 import 方式调整）
   runninghub_batch_workflow.py # Tab 4 后端 + CLI（原样提取）
 tests/

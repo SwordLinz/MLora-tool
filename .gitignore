@@ -7,6 +7,7 @@ venv/
 # App data & outputs
 data/
 outputs/
+train/
 setup.log
 
 # Local config

@@ -1,11 +1,14 @@
 """
-Batch crop / resize for training datasets — BIRME-style layout (grid + sidebar),
-with optional smart focal crop (edge energy), custom % region, and PNG rename.
+Unified crop / resize tab — BIRME-style layout (folder thumbnail grid + big
+preview) with optional smart focal crop (edge energy), custom % region and PNG
+rename, plus resolution presets, single-image upload, prev/next navigation and
+per-image save. Merges the former batch-crop and single-crop tabs.
 Inspired by https://www.birme.net/
 """
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, List, Optional, Tuple
 
 import gradio as gr
@@ -20,6 +23,7 @@ except ImportError:
 from .class_gui_config import KohyaSSGUIConfig
 from .common_gui import get_folder_path, scriptdir
 from .custom_logging import setup_logging
+from .gradio_paths import allow_path
 
 log = setup_logging()
 
@@ -37,8 +41,43 @@ def _list_images(folder: str) -> List[str]:
     return out
 
 
-MODE_TARGET = "目标尺寸（BIRME）"
+MODE_TARGET = "按目标分辨率（无拉伸）"
 MODE_REGION = "自定义区域（%）"
+
+PRESET_CUSTOM = "自定义"
+DEFAULT_PRESET = PRESET_CUSTOM
+RESOLUTION_PRESETS = [
+    "2560×1280（2:1）",
+    "2560×1440（16:9）",
+    "2560×1920（4:3）",
+    "1920×1080（16:9）",
+    "1536×1536（1:1）",
+    "1280×720（16:9）",
+    "1024×1024（1:1）",
+    "1216×832（3:2 横）",
+    "832×1216（3:2 竖）",
+]
+
+
+def _parse_preset(choice: str) -> Tuple[Optional[int], Optional[int]]:
+    if not choice or choice == PRESET_CUSTOM:
+        return None, None
+    m = re.search(r"(\d+)\s*[×xX*]\s*(\d+)", choice)
+    if not m:
+        return None, None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _sanitize_filename(name: str) -> str:
+    """Strip characters Windows forbids in file names (path separators, etc.)."""
+    return "".join("_" if c in '<>:"/\\|?*' else c for c in name).strip(" .")
+
+
+def _pos_text(idx: int, paths: List[str]) -> str:
+    if not paths:
+        return "未加载图片"
+    idx = max(0, min(int(idx), len(paths) - 1))
+    return f"第 **{idx + 1} / {len(paths)}** 张：`{os.path.basename(paths[idx])}`"
 
 
 def _crop_from_percent(
@@ -360,7 +399,7 @@ def _parse_select_index(idx: Any) -> int:
         return 0
 
 
-def gradio_batch_crop_tab(
+def gradio_crop_tab(
     headless: bool = False,
     config: Optional[KohyaSSGUIConfig] = None,
 ):
@@ -368,16 +407,26 @@ def gradio_batch_crop_tab(
     default_in = cfg.get("utilities.batch_crop_input", os.path.join(scriptdir, "data"))
     default_out = cfg.get("utilities.batch_crop_output", os.path.join(scriptdir, "outputs", "batch_crop"))
 
-    with gr.Tab("批量裁剪"):
+    with gr.Tab("裁剪"):
         gr.Markdown(
-            "BIRME 风格批量缩放/裁剪：**缩略图网格** + **大图预览**。"
-            "设置目标**宽 / 高**和**比例**，可选**自动宽/高**、**自动焦点**（基于边缘能量的裁剪）和**不缩放**（仅裁剪）。"
-            "进阶：**自定义区域 %** 对每张图片应用相同的矩形。"
+            "**① 载入**：扫描**文件夹**得到缩略图网格，或用上方**上传 / 粘贴**载入单张图片。"
+            "**② 调参**：在右侧设置目标**宽 / 高**或选**分辨率预设**，可选**自动宽/高**、**自动焦点**（边缘能量）与**不缩放**（仅裁剪）。"
+            "**③ 保存**：**保存并下一张 ▶** 会存好当前这张并自动跳到下一张（最顺手）；"
+            "**保存当前图片**只存这一张；**保存到文件夹**则整批处理。"
         )
 
         with gr.Row(equal_height=False):
             with gr.Column(scale=3, min_width=320):
-                gr.Markdown("#### 图片列表")
+                gr.Markdown("#### 单张图片（上传 / 粘贴）")
+                single_upload = gr.Image(
+                    label="拖入 / 粘贴单张图片（会替换下方列表）",
+                    type="filepath",
+                    sources=("upload", "clipboard"),
+                    interactive=True,
+                    height=180,
+                )
+
+                gr.Markdown("#### 图片列表（文件夹）")
                 input_folder = gr.Textbox(label="输入文件夹", value=default_in or "", placeholder="包含图片的文件夹")
                 output_folder = gr.Textbox(
                     label="输出文件夹（默认保存位置）",
@@ -404,6 +453,10 @@ def gradio_batch_crop_tab(
                     show_download_button=False,
                     allow_preview=True,
                 )
+                with gr.Row():
+                    prev_btn = gr.Button("◀ 上一张", visible=not headless)
+                    pos_label = gr.Markdown("未加载图片")
+                    next_btn = gr.Button("下一张 ▶", visible=not headless)
 
                 gr.Markdown("#### 大图预览（绿框 = 裁剪区域）")
                 preview = gr.Image(
@@ -415,12 +468,18 @@ def gradio_batch_crop_tab(
                 preview_zoom = gr.Slider(0.2, 4.0, value=1.0, step=0.05, label="预览缩放（仅显示）")
                 show_box = gr.Checkbox(label="显示裁剪框叠加", value=True)
 
-            with gr.Column(scale=2, min_width=260):
+            with gr.Column(scale=2, min_width=320):
                 gr.Markdown("#### 缩放 / 裁剪")
                 mode = gr.Radio(
                     choices=[MODE_TARGET, MODE_REGION],
                     value=MODE_TARGET,
                     label="裁剪模式",
+                )
+
+                preset = gr.Dropdown(
+                    choices=[PRESET_CUSTOM] + RESOLUTION_PRESETS,
+                    value=DEFAULT_PRESET,
+                    label="常用分辨率预设",
                 )
 
                 with gr.Row():
@@ -430,13 +489,15 @@ def gradio_batch_crop_tab(
                     out_h = gr.Number(value=1280, precision=0, label="高度（px）")
                     auto_h = gr.Checkbox(label="自动高度", value=False)
 
+                swap_wh_btn = gr.Button("⇄ 宽高互换（W ↔ H）")
+
                 with gr.Row():
                     ratio_w = gr.Number(value=4, precision=0, label="比例 W")
                     ratio_h = gr.Number(value=5, precision=0, label="比例 H")
 
                 high_q = gr.Checkbox(label="高质量缩放（Lanczos）", value=True)
                 auto_focal = gr.Checkbox(
-                    label="自动检测焦点（逐��边缘能量分析）",
+                    label="自动检测焦点（逐张边缘能量分析）",
                     value=True,
                 )
                 no_resize = gr.Checkbox(
@@ -447,6 +508,45 @@ def gradio_batch_crop_tab(
                 gr.Markdown("##### 手动焦点微调（基于计算的裁剪框）")
                 shift_x = gr.Slider(-20, 20, value=0, step=0.5, label="水平偏移 %（相对图片宽度）")
                 shift_y = gr.Slider(-20, 20, value=0, step=0.5, label="垂直偏移 %（相对图片高度）")
+
+                with gr.Group(elem_classes=["sd-save-card"]):
+                    gr.Markdown(
+                        "#### 💾 保存当前图片\n"
+                        "改完参数直接保存；点 **保存并下一张 ▶** 会存好当前这张并自动跳到下一张。"
+                    )
+                    cur_filename = gr.Textbox(
+                        label="文件名（不含扩展名；留空 = 沿用原文件名）",
+                        value="",
+                        placeholder="留空则用当前图片的文件名",
+                    )
+                    cur_format = gr.Radio(
+                        choices=["PNG", "JPG"], value="PNG", label="格式"
+                    )
+                    cur_overwrite = gr.Checkbox(
+                        label="覆盖同名文件（不勾选则自动加序号）",
+                        value=False,
+                    )
+                    with gr.Row():
+                        save_cur_btn = gr.Button(
+                            "保存当前图片",
+                            variant="primary",
+                            visible=not headless,
+                            scale=1,
+                        )
+                        save_next_btn = gr.Button(
+                            "保存并下一张 ▶",
+                            variant="secondary",
+                            visible=not headless,
+                            scale=1,
+                        )
+                    save_status = gr.Markdown("", elem_classes=["sd-save-status"])
+                    result_file = gr.File(
+                        label="最近保存的文件",
+                        interactive=False,
+                        height=80,
+                        visible=False,
+                        elem_classes=["sd-save-file"],
+                    )
 
                 with gr.Accordion("进阶：自定义区域（%）", open=False):
                     gr.Markdown("对**每张**图片应用相同的百分比裁剪（旧模式）。")
@@ -483,10 +583,11 @@ def gradio_batch_crop_tab(
         def scan_folder(path, m, lp, tp, wp, hp, tw, th, zoom, show_b, af, sx, sy, nr):
             path = (path or "").strip().strip('"')
             if not path or not os.path.isdir(path):
-                return [], 0, [], "文件夹无效。", None
+                return [], 0, [], "文件夹无效。", None, "未加载图片"
             paths = _list_images(path)
             if not paths:
-                return [], 0, [], "未找到图片。", None
+                return [], 0, [], "未找到图片。", None, "未加载图片"
+            allow_path(path)
             gallery_items = [(p, os.path.basename(p)) for p in paths]
             mk = _mode_key(m)
             preview_img = _preview_with_box(
@@ -505,7 +606,14 @@ def gradio_batch_crop_tab(
                 sy,
                 nr,
             )
-            return paths, 0, gallery_items, f"找到 {len(paths)} 张图片。", preview_img
+            return (
+                paths,
+                0,
+                gallery_items,
+                f"找到 {len(paths)} 张图片。",
+                preview_img,
+                _pos_text(0, paths),
+            )
 
         def _path_at(paths: List[str], idx: int) -> str:
             if not paths:
@@ -555,7 +663,63 @@ def gradio_batch_crop_tab(
                     sy,
                     nr,
                 ),
+                _pos_text(idx, paths or []),
             )
+
+        def step_image(paths, idx, delta, m, lp, tp, wp, hp, tw, th, zoom, show_b, af, sx, sy, nr):
+            """Cycle through the loaded list and refresh the preview."""
+            if not paths:
+                return 0, None, "请先扫描文件夹或上传单张图片。", _pos_text(0, paths or [])
+            nidx = (int(idx or 0) + delta) % len(paths)
+            mk = _mode_key(m)
+            preview_img = _preview_with_box(
+                _path_at(paths, nidx),
+                mk,
+                lp,
+                tp,
+                wp,
+                hp,
+                float(tw or 1024),
+                float(th or 1280),
+                zoom,
+                show_b,
+                af,
+                sx,
+                sy,
+                nr,
+            )
+            return nidx, preview_img, "", _pos_text(nidx, paths)
+
+        def go_prev(paths, idx, m, lp, tp, wp, hp, tw, th, zoom, show_b, af, sx, sy, nr):
+            return step_image(paths, idx, -1, m, lp, tp, wp, hp, tw, th, zoom, show_b, af, sx, sy, nr)
+
+        def go_next(paths, idx, m, lp, tp, wp, hp, tw, th, zoom, show_b, af, sx, sy, nr):
+            return step_image(paths, idx, 1, m, lp, tp, wp, hp, tw, th, zoom, show_b, af, sx, sy, nr)
+
+        def load_single_image(path, m, lp, tp, wp, hp, tw, th, zoom, show_b, af, sx, sy, nr):
+            """Turn an uploaded/pasted image into a one-item list and preview it."""
+            p = (path or "").strip().strip('"') if isinstance(path, str) else ""
+            if not p or not os.path.isfile(p):
+                # Cleared/invalid upload: keep whatever list is already loaded.
+                return (gr.update(),) * 6
+            mk = _mode_key(m)
+            preview_img = _preview_with_box(
+                p,
+                mk,
+                lp,
+                tp,
+                wp,
+                hp,
+                float(tw or 1024),
+                float(th or 1280),
+                zoom,
+                show_b,
+                af,
+                sx,
+                sy,
+                nr,
+            )
+            return [p], 0, [(p, os.path.basename(p))], "已载入单张图片。", preview_img, _pos_text(0, [p])
 
         def reset_settings():
             return (
@@ -572,15 +736,22 @@ def gradio_batch_crop_tab(
                 0,
                 1.0,
                 True,
-                "Target size (BIRME)",
+                MODE_TARGET,
                 0,
                 0,
                 100,
                 100,
+                PRESET_CUSTOM,
             )
 
         def clear_list():
-            return [], 0, [], "列表已清空，请重新扫描加载。", None
+            return [], 0, [], "列表已清空，请重新扫描加载。", None, "未加载图片"
+
+        def apply_preset(choice):
+            w, h = _parse_preset(choice)
+            if w is None or h is None:
+                return gr.update(), gr.update()
+            return gr.update(value=w), gr.update(value=h)
 
         def recompute_w_from_h(h, rw, rh, use_auto_w: bool):
             if not use_auto_w or rh <= 0:
@@ -607,6 +778,155 @@ def gradio_batch_crop_tab(
                 return gr.update(value=False)
             return gr.update()
 
+        def swap_wh(w, h):
+            return gr.update(value=h), gr.update(value=w)
+
+        def save_current(
+            paths,
+            idx,
+            m,
+            lp,
+            tp,
+            wp,
+            hp,
+            tw,
+            th,
+            hq,
+            af,
+            sx,
+            sy,
+            nr,
+            out_dir,
+            filename,
+            out_format,
+            overwrite,
+        ):
+            p = _path_at(paths or [], _parse_select_index(idx))
+            if not p or not os.path.isfile(p):
+                return "没有可保存的图片，请先扫描文件夹或上传单张图片。", None
+            out_dir = (out_dir or "").strip().strip('"') or os.path.join(
+                scriptdir, "outputs", "crop"
+            )
+            os.makedirs(out_dir, exist_ok=True)
+            allow_path(out_dir)
+            tw_i = max(1, int(round(float(tw or 1024))))
+            th_i = max(1, int(round(float(th or 1280))))
+            try:
+                im = Image.open(p)
+                im.load()
+                im = im.convert("RGB")
+            except OSError as e:
+                log.warning("Single save open failed %s: %s", p, e)
+                return f"打开失败：{e}", None
+            try:
+                out = _process_one_image(
+                    im,
+                    _mode_key(m),
+                    lp,
+                    tp,
+                    wp,
+                    hp,
+                    tw_i,
+                    th_i,
+                    hq,
+                    af,
+                    sx,
+                    sy,
+                    nr,
+                )
+                name = _sanitize_filename((filename or "").strip())
+                if not name:
+                    name = _sanitize_filename(os.path.splitext(os.path.basename(p))[0])
+                name = name or "cropped"
+                ext = ".png" if out_format == "PNG" else ".jpg"
+                out_path = os.path.join(out_dir, name + ext)
+                if not overwrite:
+                    counter = 1
+                    while os.path.exists(out_path):
+                        out_path = os.path.join(out_dir, f"{name}_{counter}{ext}")
+                        counter += 1
+                if ext == ".jpg":
+                    _flatten_transparency_to_white(out).save(out_path, quality=95)
+                else:
+                    _flatten_transparency_to_white(out).save(out_path, "PNG")
+            except Exception as e:
+                log.exception("Single save failed")
+                return f"保存失败：{type(e).__name__}: {e}", None
+            msg = f"已保存 {out.width}×{out.height}：`{os.path.basename(out_path)}`"
+            log.info("已保存 %s", out_path)
+            return msg, out_path
+
+        def save_and_next(
+            paths,
+            idx,
+            m,
+            lp,
+            tp,
+            wp,
+            hp,
+            tw,
+            th,
+            hq,
+            af,
+            sx,
+            sy,
+            nr,
+            out_dir,
+            filename,
+            out_format,
+            overwrite,
+            zoom,
+            show_b,
+        ):
+            """Save the current image, then advance to the next one in the list."""
+            msg, out_path = save_current(
+                paths,
+                idx,
+                m,
+                lp,
+                tp,
+                wp,
+                hp,
+                tw,
+                th,
+                hq,
+                af,
+                sx,
+                sy,
+                nr,
+                out_dir,
+                filename,
+                out_format,
+                overwrite,
+            )
+            cur = _parse_select_index(idx)
+            if not paths or out_path is None:
+                return msg, None, cur, gr.update(), _pos_text(cur, paths or [])
+            nidx = (cur + 1) % len(paths)
+            preview_img = _preview_with_box(
+                _path_at(paths, nidx),
+                _mode_key(m),
+                lp,
+                tp,
+                wp,
+                hp,
+                float(tw or 1024),
+                float(th or 1280),
+                float(zoom or 1.0),
+                show_b,
+                af,
+                sx,
+                sy,
+                nr,
+            )
+            return (
+                f"{msg}\n\n▶ 已跳到第 **{nidx + 1} / {len(paths)}** 张。",
+                out_path,
+                nidx,
+                preview_img,
+                _pos_text(nidx, paths),
+            )
+
         in_browse.click(fn=get_folder_path, inputs=input_folder, outputs=input_folder)
         out_browse.click(fn=get_folder_path, inputs=output_folder, outputs=output_folder)
         scan_btn.click(
@@ -627,8 +947,12 @@ def gradio_batch_crop_tab(
                 shift_y,
                 no_resize,
             ],
-            outputs=[image_paths, selected_idx, thumb_gallery, status, preview],
+            outputs=[image_paths, selected_idx, thumb_gallery, status, preview, pos_label],
         )
+
+        swap_wh_btn.click(fn=swap_wh, inputs=[out_w, out_h], outputs=[out_w, out_h])
+
+        preset.change(fn=apply_preset, inputs=preset, outputs=[out_w, out_h])
 
         auto_w.change(fn=toggle_auto_w, inputs=auto_w, outputs=auto_h)
         auto_h.change(fn=toggle_auto_h, inputs=auto_h, outputs=auto_w)
@@ -707,7 +1031,69 @@ def gradio_batch_crop_tab(
                 shift_y,
                 no_resize,
             ],
-            outputs=[selected_idx, preview],
+            outputs=[selected_idx, preview, pos_label],
+        )
+
+        nav_inputs = preview_inputs
+        nav_outputs = [selected_idx, preview, status, pos_label]
+        prev_btn.click(fn=go_prev, inputs=nav_inputs, outputs=nav_outputs)
+        next_btn.click(fn=go_next, inputs=nav_inputs, outputs=nav_outputs)
+
+        single_inputs = [single_upload] + preview_inputs[2:]
+        single_upload.change(
+            fn=load_single_image,
+            inputs=single_inputs,
+            outputs=[image_paths, selected_idx, thumb_gallery, status, preview, pos_label],
+        )
+
+        save_inputs = [
+            image_paths,
+            selected_idx,
+            mode,
+            left_pct,
+            top_pct,
+            crop_w_pct,
+            crop_h_pct,
+            out_w,
+            out_h,
+            high_q,
+            auto_focal,
+            shift_x,
+            shift_y,
+            no_resize,
+            output_folder,
+            cur_filename,
+            cur_format,
+            cur_overwrite,
+        ]
+
+        def _save_current_ui(*args):
+            msg, out_path = save_current(*args)
+            if not out_path:
+                return msg, gr.update()
+            return msg, gr.update(value=out_path, visible=True)
+
+        def _save_and_next_ui(*args):
+            msg, out_path, nidx, preview_img, pos = save_and_next(*args)
+            if not out_path:
+                return msg, gr.update(), nidx, preview_img, pos
+            return (
+                msg,
+                gr.update(value=out_path, visible=True),
+                nidx,
+                preview_img,
+                pos,
+            )
+
+        save_cur_btn.click(
+            fn=_save_current_ui,
+            inputs=save_inputs,
+            outputs=[save_status, result_file],
+        )
+        save_next_btn.click(
+            fn=_save_and_next_ui,
+            inputs=save_inputs + [preview_zoom, show_box],
+            outputs=[save_status, result_file, selected_idx, preview, pos_label],
         )
 
         reset_btn.click(
@@ -731,10 +1117,14 @@ def gradio_batch_crop_tab(
                 top_pct,
                 crop_w_pct,
                 crop_h_pct,
+                preset,
             ],
         ).then(fn=update_preview, inputs=preview_inputs, outputs=preview)
 
-        clear_btn.click(fn=clear_list, outputs=[image_paths, selected_idx, thumb_gallery, status, preview])
+        clear_btn.click(
+            fn=clear_list,
+            outputs=[image_paths, selected_idx, thumb_gallery, status, preview, pos_label],
+        )
 
         def _run_wrapper(
             in_dir,
